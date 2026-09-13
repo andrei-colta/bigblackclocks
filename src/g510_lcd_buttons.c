@@ -47,7 +47,7 @@ static void log_button(const char *name) {
     time_t now = time(NULL);
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", localtime(&now));
-    fprintf(f, "[%s] %s pressed (no action assigned yet)\n", buf, name);
+    fprintf(f, "[%s] %s pressed\n", buf, name);
     fclose(f);
 }
 

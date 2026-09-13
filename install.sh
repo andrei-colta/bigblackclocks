@@ -11,7 +11,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 echo "=== 1/6: Official repo packages ==="
-sudo pacman -S --needed --noconfirm yad python-pyqt5 python-pillow ydotool python-evdev
+sudo pacman -S --needed --noconfirm yad python-pyqt5 python-pillow ydotool python-evdev freetype2
 
 echo "=== 2/6: AUR packages (libg15, libg15render -- needs yay) ==="
 if ! command -v yay &>/dev/null; then
@@ -23,7 +23,11 @@ fi
 yay -S --needed --noconfirm libg15 libg15render
 
 echo "=== 3/6: Compile the C programs ==="
-gcc src/g510_lcd_stats.c -o src/g510_lcd_stats -lg15render
+# g510_lcd_stats needs the same FreeType/TTF flags libg15render.so itself
+# was built with -- without them, g15canvas's struct layout mismatches
+# between this program and the library, corrupting stack memory (this
+# bit us once already while building v1.1; caught via AddressSanitizer).
+gcc $(pkg-config --cflags freetype2) src/g510_lcd_stats.c -o src/g510_lcd_stats -lg15render $(pkg-config --libs freetype2)
 gcc src/g510_lcd_buttons.c -o src/g510_lcd_buttons
 
 echo "=== 4/6: udev rules + hwdb (needs sudo) ==="
@@ -53,7 +57,7 @@ echo "=== Done -- one manual step left ==="
 echo "This project doesn't include the Eurostile Bold font (commercial"
 echo "license, can't redistribute it). Without it, the LCD label font"
 echo "won't load. Get your own copy, then run:"
-echo "  g15fontconvert -i /path/to/Euro_Bold.otf -o fonts/lcd-label-8.fnt -s 6 -g 1"
+echo "  g15fontconvert -s 8 -i /path/to/Euro_Bold.otf -o fonts/lcd-label-8.fnt"
 echo ""
 echo "Also can't be scripted: Brave's 'Plasma Integration' extension"
 echo "media-control feature needs to be manually disabled if you use"

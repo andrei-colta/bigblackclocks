@@ -6,9 +6,10 @@ Architecture: one QTabWidget, one tab per feature. Adding a new feature
 = adding a new tab class + one line in MainWindow.__init__. Nothing in
 an existing tab needs to change when a new one is added.
 
-Phase 1 (this file): Backlight tab (color/brightness + service control).
-G-Keys tab (this file): record/assign macros to G1-G18 per M1/M2/M3 profile.
-Phase 2 (later):     Custom Screen tab (text/image placement on screen 6).
+Phase 1: Backlight tab (color/brightness + service control).
+         G-Keys tab (record/assign macros to G1-G18 per M1/M2/M3 profile).
+Phase 2: Custom Screens tab (AIDA64-style sensor dashboard builder for
+         the L2-L5 buttons, with a live preview of the real LCD output).
 """
 import sys
 import json
@@ -18,9 +19,10 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QComboBox, QSlider, QPushButton, QLabel,
-    QMessageBox, QDialog, QLineEdit,
+    QMessageBox, QDialog, QLineEdit, QSpinBox, QFrame,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QImage, QPixmap
 import evdev
 from evdev import ecodes
 
@@ -29,6 +31,10 @@ LED_DIR = Path("/sys/class/leds/g15::kbd_backlight")
 DEFAULTS_SCRIPT = PROJECT_DIR / "scripts" / "set-backlight-color.sh"
 MACROS_FILE = PROJECT_DIR / "macros.json"
 MAIN_KEYBOARD_DEVICE = "/dev/input/by-id/usb-Logitech_G510s_Gaming_Keyboard-event-kbd"
+STATS_BINARY = PROJECT_DIR / "src" / "g510_lcd_stats"
+CUSTOM_SCREENS_FILE = PROJECT_DIR / "custom_screens.txt"
+LCD_WIDTH = 160
+LCD_HEIGHT = 43
 
 
 def active_profile_file():
@@ -442,16 +448,322 @@ class GKeysTab(QWidget):
         dlg.exec_()
 
 
+# --- Custom Screens (v1.1): dashboards for L2-L5, mirrors the sensor
+# table in g510_lcd_stats.c's SENSORS[] array. Keep the two in sync if a
+# sensor is ever added or renamed -- there's no shared source of truth
+# because one side is C and the other Python, by design (no JSON/IPC
+# schema needed for something this small).
+SENSOR_CHOICES = [
+    ("CPU_PCT", "CPU %"),
+    ("CPU_GHZ", "CPU GHz"),
+    ("CPU_TEMP", "CPU Temp"),
+    ("RAM_PCT", "RAM %"),
+    ("VRAM_PCT", "VRAM %"),
+    ("MAXTEMP", "Max Temp Seen"),
+    ("GPU_PCT", "GPU %"),
+    ("GPU_EDGE_TEMP", "GPU Edge Temp"),
+    ("GPU_HOTSPOT_TEMP", "GPU Hotspot Temp"),
+    ("GPU_VRAM_TEMP", "GPU VRAM Temp"),
+    ("SWAP_PCT", "Swap %"),
+    ("DISK_ROOT_PCT", "Disk % (root)"),
+    ("DISK_FRIGIDER_PCT", "Disk % (frigider)"),
+    ("UPTIME", "Uptime"),
+    ("NET_DOWN", "Network Download Speed"),
+    ("NET_UP", "Network Upload Speed"),
+    ("MB_TEMP1", "Motherboard Temp 1 (unlabeled)"),
+    ("MB_TEMP2", "Motherboard Temp 2 (unlabeled)"),
+    ("MB_TEMP3", "Motherboard Temp 3 (unlabeled)"),
+    ("MB_TEMP4", "Motherboard Temp 4 (unlabeled)"),
+    ("MB_TEMP5", "Motherboard Temp 5 (unlabeled)"),
+    ("MB_TEMP6", "Motherboard Temp 6 (unlabeled)"),
+]
+SENSOR_LABELS = dict(SENSOR_CHOICES)
+
+# Only sensors with an honest 0-100 scale (a true percent, or a
+# temperature via the 0-90C convention already used on the main stats
+# screen) can be shown as a bar -- matches is_percent/is_temp in the C
+# SENSORS[] table exactly. Anything else offered as "Bar" would need a
+# guessed scale, which we don't do.
+BAR_CAPABLE_SENSORS = {
+    "CPU_PCT", "CPU_TEMP", "RAM_PCT", "VRAM_PCT", "MAXTEMP",
+    "GPU_PCT", "GPU_EDGE_TEMP", "GPU_HOTSPOT_TEMP", "GPU_VRAM_TEMP",
+    "SWAP_PCT", "DISK_ROOT_PCT", "DISK_FRIGIDER_PCT",
+    "MB_TEMP1", "MB_TEMP2", "MB_TEMP3", "MB_TEMP4", "MB_TEMP5", "MB_TEMP6",
+}
+
+CUSTOM_SCREEN_KEYS = ["L2", "L3", "L4", "L5"]
+
+
+def load_custom_screens():
+    """Returns {"L2": [ {sensor,style,x,y}, ... ], "L3": [...], ...}"""
+    config = {k: [] for k in CUSTOM_SCREEN_KEYS}
+    if not CUSTOM_SCREENS_FILE.exists():
+        return config
+    current = None
+    for line in CUSTOM_SCREENS_FILE.read_text().splitlines():
+        line = line.strip()
+        if line.startswith("SCREEN "):
+            key = line.split(" ", 1)[1]
+            current = key if key in config else None
+        elif line.startswith("ELEMENT ") and current:
+            el = {"sensor": "", "style": "number", "x": 0, "y": 0}
+            for tok in line[len("ELEMENT "):].split():
+                if "=" not in tok:
+                    continue
+                k, v = tok.split("=", 1)
+                if k in ("x", "y"):
+                    try:
+                        el[k] = int(v)
+                    except ValueError:
+                        pass
+                elif k in ("sensor", "style"):
+                    el[k] = v
+            if el["sensor"]:
+                config[current].append(el)
+    return config
+
+
+def save_custom_screens(config):
+    lines = []
+    for key in CUSTOM_SCREEN_KEYS:
+        lines.append(f"SCREEN {key}")
+        for el in config[key]:
+            lines.append(f"ELEMENT sensor={el['sensor']} style={el['style']} x={el['x']} y={el['y']}")
+    CUSTOM_SCREENS_FILE.write_text("\n".join(lines) + "\n")
+
+
+def render_preview(screen_num):
+    """Runs the same C binary that draws the real LCD, in one-shot
+    --preview mode, and returns a QPixmap -- guaranteed pixel-identical
+    to what the real screen shows, since it's the same drawing code."""
+    if not STATS_BINARY.exists():
+        return None, "Not built yet -- run install.sh or rebuild the C programs."
+    out_path = Path("/tmp/g510_app_preview.ppm")
+    try:
+        result = subprocess.run(
+            [str(STATS_BINARY), "--preview", str(screen_num), str(out_path)],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None, f"Preview render failed: {result.stderr.strip()}"
+    except Exception as e:
+        return None, f"Couldn't run preview: {e}"
+
+    try:
+        data = out_path.read_bytes()
+    except Exception as e:
+        return None, f"Couldn't read preview output: {e}"
+
+    # Minimal hand-rolled P6 PPM parser -- avoids depending on Qt's
+    # optional ppm plugin being present on whatever system this runs on.
+    if not data.startswith(b"P6"):
+        return None, "Preview output wasn't a valid PPM image."
+    parts = data.split(b"\n", 3)
+    if len(parts) < 4:
+        return None, "Malformed PPM header."
+    try:
+        w, h = (int(x) for x in parts[1].split())
+    except ValueError:
+        return None, "Malformed PPM header."
+    pixels = parts[3]
+    img = QImage(w, h, QImage.Format_RGB888)
+    if len(pixels) < w * h * 3:
+        return None, "Truncated PPM data."
+    for y in range(h):
+        row_start = y * w * 3
+        img.scanLine(y)  # ensure detach
+        for x in range(w):
+            i = row_start + x * 3
+            img.setPixel(x, y, (pixels[i] << 16) | (pixels[i + 1] << 8) | pixels[i + 2])
+    return QPixmap.fromImage(img), None
+
+
+class CustomScreensTab(QWidget):
+    """AIDA64-style dashboard builder for the L2-L5 buttons. Pick a
+    screen, add sensors with a display style and position, see the
+    result live -- the preview is the real LCD-drawing code running in
+    a one-shot mode, so what you see here is exactly what the keyboard
+    will show."""
+    def __init__(self):
+        super().__init__()
+        self.current_screen = "L2"
+        self.config = load_custom_screens()
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("<b>Custom Screens</b> (L2-L5 buttons)"))
+
+        screen_row = QHBoxLayout()
+        screen_row.setSpacing(24)
+        screen_row.addStretch()
+        self.screen_buttons = {}
+        for key in CUSTOM_SCREEN_KEYS:
+            btn = QPushButton(key)
+            btn.setCheckable(True)
+            btn.setStyleSheet(
+                "QPushButton { font-weight: bold; font-size: 14px; padding: 6px 14px; }"
+                "QPushButton:checked { background-color: #4a90d9; color: white; }"
+            )
+            btn.clicked.connect(lambda _, k=key: self.select_screen(k))
+            screen_row.addWidget(btn)
+            self.screen_buttons[key] = btn
+        screen_row.addStretch()
+        self.screen_buttons["L2"].setChecked(True)
+        layout.addLayout(screen_row)
+
+        # Live preview -- scaled up 4x (160x43 -> 640x172) so it's
+        # actually readable, tinted to match the real green-on-black LCD.
+        self.preview_label = QLabel("Preview loading...")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setFixedSize(LCD_WIDTH * 4, LCD_HEIGHT * 4)
+        self.preview_label.setStyleSheet("background-color: #bed691; border: 1px solid #555;")
+        preview_row = QHBoxLayout()
+        preview_row.addStretch()
+        preview_row.addWidget(self.preview_label)
+        preview_row.addStretch()
+        layout.addLayout(preview_row)
+
+        layout.addWidget(self._hline())
+
+        layout.addWidget(QLabel("<b>Add Element</b>"))
+        form_row = QHBoxLayout()
+        self.sensor_combo = QComboBox()
+        for key, label in SENSOR_CHOICES:
+            self.sensor_combo.addItem(label, key)
+        self.sensor_combo.currentIndexChanged.connect(self.on_sensor_changed)
+        form_row.addWidget(self.sensor_combo)
+
+        self.style_combo = QComboBox()
+        self.style_combo.addItem("Number", "number")
+        self.style_combo.addItem("Bar", "bar")
+        form_row.addWidget(self.style_combo)
+
+        form_row.addWidget(QLabel("X:"))
+        self.x_spin = QSpinBox()
+        self.x_spin.setRange(0, LCD_WIDTH - 1)
+        self.x_spin.setValue(6)
+        form_row.addWidget(self.x_spin)
+
+        form_row.addWidget(QLabel("Y:"))
+        self.y_spin = QSpinBox()
+        self.y_spin.setRange(0, LCD_HEIGHT - 1)
+        self.y_spin.setValue(3)
+        form_row.addWidget(self.y_spin)
+
+        add_btn = QPushButton("Add")
+        add_btn.clicked.connect(self.on_add_element)
+        form_row.addWidget(add_btn)
+        layout.addLayout(form_row)
+
+        self.bar_hint_label = QLabel(
+            "Bar isn't available for this sensor (no honest 0-100 scale) -- it'll show as a number."
+        )
+        self.bar_hint_label.setStyleSheet("color: #888; font-style: italic;")
+        self.bar_hint_label.hide()
+        layout.addWidget(self.bar_hint_label)
+
+        layout.addWidget(QLabel("<b>Elements on this screen</b>"))
+        self.elements_layout = QVBoxLayout()
+        layout.addLayout(self.elements_layout)
+
+        layout.addStretch()
+        self.setLayout(layout)
+
+        self.on_sensor_changed()
+        self.refresh_elements_list()
+        self.refresh_preview()
+
+        # Keeps the preview live (matches the real daemon's own refresh
+        # cadence for these screens) so it feels the same as watching
+        # the actual keyboard.
+        self.preview_timer = QTimer(self)
+        self.preview_timer.timeout.connect(self.refresh_preview)
+        self.preview_timer.start(1000)
+
+    def _hline(self):
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setFrameShadow(QFrame.Sunken)
+        return line
+
+    def select_screen(self, key):
+        self.current_screen = key
+        for k, btn in self.screen_buttons.items():
+            btn.setChecked(k == key)
+        self.refresh_elements_list()
+        self.refresh_preview()
+
+    def on_sensor_changed(self):
+        sensor_key = self.sensor_combo.currentData()
+        capable = sensor_key in BAR_CAPABLE_SENSORS
+        self.bar_hint_label.setVisible(not capable)
+
+    def screen_number(self):
+        return int(self.current_screen[1])  # "L2" -> 2
+
+    def on_add_element(self):
+        elements = self.config[self.current_screen]
+        if len(elements) >= 8:
+            QMessageBox.warning(self, "Screen full", "Each screen supports up to 8 elements.")
+            return
+        elements.append({
+            "sensor": self.sensor_combo.currentData(),
+            "style": self.style_combo.currentData(),
+            "x": self.x_spin.value(),
+            "y": self.y_spin.value(),
+        })
+        save_custom_screens(self.config)
+        self.refresh_elements_list()
+        self.refresh_preview()
+
+    def on_remove_element(self, index):
+        del self.config[self.current_screen][index]
+        save_custom_screens(self.config)
+        self.refresh_elements_list()
+        self.refresh_preview()
+
+    def refresh_elements_list(self):
+        while self.elements_layout.count():
+            item = self.elements_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        elements = self.config[self.current_screen]
+        if not elements:
+            self.elements_layout.addWidget(QLabel("Nothing on this screen yet."))
+            return
+        for i, el in enumerate(elements):
+            row = QHBoxLayout()
+            label = SENSOR_LABELS.get(el["sensor"], el["sensor"])
+            row.addWidget(QLabel(f"{label} - {el['style']} @ ({el['x']}, {el['y']})"))
+            row.addStretch()
+            remove_btn = QPushButton("Remove")
+            remove_btn.clicked.connect(lambda _, idx=i: self.on_remove_element(idx))
+            row.addWidget(remove_btn)
+            container = QWidget()
+            container.setLayout(row)
+            self.elements_layout.addWidget(container)
+
+    def refresh_preview(self):
+        pixmap, err = render_preview(self.screen_number())
+        if pixmap is None:
+            self.preview_label.setText(err or "Preview unavailable.")
+            return
+        scaled = pixmap.scaled(
+            LCD_WIDTH * 4, LCD_HEIGHT * 4, Qt.KeepAspectRatio, Qt.FastTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("G510 LCD Control")
-        self.resize(420, 420)
+        self.resize(720, 640)
 
         tabs = QTabWidget()
         tabs.addTab(BacklightTab(), "Backlight")
         tabs.addTab(GKeysTab(), "G-Keys")
-        # Phase 2: tabs.addTab(CustomScreenTab(), "Custom Screen")
+        tabs.addTab(CustomScreensTab(), "Custom Screens")
         self.setCentralWidget(tabs)
 
 

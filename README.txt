@@ -12,9 +12,75 @@ the one thing it CAN'T automate: sourcing your own Eurostile Bold font).
 STATUS FOR AI AGENTS -- read this block only, skip the rest unless you
 need deep detail for actual debugging:
 
-v1.0 TAGGED (git tag v1.0, pushed). Everything below is DONE and
-confirmed working by the user -- don't re-diagnose any of it, only
-read further sections if something specific is actually broken.
+v1.0 TAGGED (git tag v1.0, pushed). Everything in the v1.0 section
+below is DONE and confirmed working by the user -- don't re-diagnose
+any of it, only read further sections if something specific is
+actually broken.
+
+v1.1 BUILT, NOT YET TAGGED -- code is committed on main, rebuilt
+binaries are live and running on the real hardware, and everything has
+been verified by the assistant (compiled clean, ran repeatedly with no
+crash, output visually inspected pixel-by-pixel). It has NOT yet been
+physically confirmed by the user on the actual keyboard LCD -- don't
+tag v1.1 or claim it's "done" until that happens.
+
+What v1.1 adds: a "Custom Screens" tab in g510_app.py -- an AIDA64-
+style dashboard builder for the L2-L5 buttons. Pick a screen (L2-L5),
+add sensors with a display style (Number or Bar) and an X/Y position,
+see the result in a live preview pane, Remove any element -- every
+change auto-saves immediately (no separate Save button). New sensors
+beyond the original CPU/RAM/VRAM/CPU-Temp: GPU %, GPU Edge/Hotspot/
+VRAM temps, Swap %, Disk % (root + the "frigider" drive), Uptime,
+Network up/down speed, and 6 genuinely-unlabeled motherboard temps
+(shown honestly as "MB Temp 1..6", not invented names). Layouts are
+stored in custom_screens.txt (plain SCREEN/ELEMENT text lines, no JSON
+lib needed in C) and rendered by g510_lcd_stats.c's draw_custom_screen().
+
+Preview mechanism: g510_lcd_stats gained a `--preview <screen> <outfile>`
+one-shot mode that renders a single frame through the EXACT same
+drawing code as the live LCD, but writes a PPM image file instead of
+touching /dev/g510-lcd. g510_app.py runs this in the background and
+displays the result -- what you see in the editor is guaranteed
+pixel-identical to the real screen, not a lookalike.
+
+Two real bugs found and fixed while building this (both matter beyond
+v1.1, keep in mind for any future C changes to this file):
+1. g510_lcd_stats.c's compile command was missing FreeType/TTF flags
+   that libg15render.so was actually built with. Without them, this
+   program's view of the g15canvas struct is SMALLER than what the
+   library writes into (it has extra FT_Library/FT_Face fields gated
+   by #ifdef TTF_SUPPORT) -- g15r_initCanvas() then writes past the
+   end of the stack-allocated struct. This was a LATENT bug in v1.0
+   too (silently landed on stack padding, never tripped anything
+   visible) until v1.1's extra locals shifted it onto the stack
+   canary, causing "stack smashing detected" aborts. Confirmed via
+   AddressSanitizer (no heap/logic bug, only leaked FreeType init
+   allocations -- harmless) plus a direct A/B compile with and without
+   stack-protector. Fix: `#define TTF_SUPPORT` + FreeType headers
+   before `#include <libg15render.h>`, and compile with
+   `$(pkg-config --cflags freetype2) ... $(pkg-config --libs freetype2)`.
+   This is now in install.sh, scripts/rebuild.sh, and the source file
+   itself -- if you ever hand-compile this file, use the same flags or
+   it WILL crash intermittently.
+2. fonts/lcd-label-8.fnt (the converted Eurostile Bold label font) had
+   a corrupted 'S' glyph (rendered as something closer to a '6'). Never
+   caught before because no existing label (CPU/RAM/VRAM/TEMP/MAX)
+   contained the letter S -- v1.1's "SWAP" and "DISK" labels hit it
+   immediately. Fixed by reconverting from the original source font
+   (/usr/local/share/fonts/e/Eurostile_Bold.otf) via
+   `g15fontconvert -s 8 -i <otf> -o fonts/lcd-label-8.fnt`. Verified by
+   rendering the full A-Z alphabet plus every actual label string used
+   in the sensor table -- all clean now, and the pre-existing CPU/RAM/
+   VRAM/TEMP screen was re-verified pixel-for-pixel unchanged.
+
+PNG/image placement on custom screens (the OLDER Phase 2 idea, before
+the user reprioritized) is DEPRIORITIZED, not built into the Custom
+Screens tab. src/png-to-lcd.py and g15r_drawXBM() still exist and still
+work if this ever comes back, but they are NOT wired into anything
+current -- don't assume they're part of the live feature set.
+
+v1.0 SECTION (everything below in this section is DONE and confirmed
+working by the user):
 
 - PRIMARY UI is g510_app.py (PyQt5, one window, QTabWidget).
   - Backlight tab: color preset dropdown, brightness slider, Apply
@@ -50,23 +116,6 @@ read further sections if something specific is actually broken.
   g510-backlight-apply.sh) is NOT on this branch anymore -- it lives on
   the `legacy-yad-backlight-script` branch as a standalone reference.
   g510_app.py is the only interface on main.
-
-PHASE 2, NOT STARTED -- the user's own words: "the AIDA64 way of
-editing the display and drawing/setting functions/displays for the
-other L keys". Two parts:
-  1. A visual/drag-free screen editor (like AIDA64's LCD designer) for
-     placing text and PNG images on custom LCD screens -- NOT a
-     from-scratch GUI framework choice needed, PyQt5 is already the
-     app's framework. png-to-lcd.py (PNG -> raw XBM bitmap) and the
-     g15r_drawXBM() render path in g510_lcd_stats.c are already
-     built+verified working (a rectangle test rendered correctly on
-     the real screen) and ready to reuse.
-  2. Real functions for L2-L5 (currently just placeholder "L2".."L5"
-     test screens, see BUTTONS section) -- once part 1 exists, these
-     buttons should jump to specific custom screens/actions instead.
-The user EXPLICITLY wants this planned and confirmed with them BEFORE
-any code is written -- do not start building it unprompted, even
-though the technical pieces above are ready to go.
 
 (rest of this file: explains the WHY behind the non-obvious parts, for
 whoever/whatever needs to actually debug something)

@@ -1,9 +1,21 @@
+/* libg15render.so on this system was built with FreeType/TTF support
+   compiled in, which adds extra fields to g15canvas (see the #ifdef
+   TTF_SUPPORT block in the header). Without defining this here too, our
+   compilation sees a SMALLER g15canvas struct than the library actually
+   writes to -- g15r_initCanvas() then writes past the end of our
+   stack-allocated struct. This was a latent bug in the original code too
+   (it just happened to land on harmless stack padding); confirmed via
+   AddressSanitizer + a stack-protector trip while adding v1.1 features. */
+#define TTF_SUPPORT
+#include <ft2build.h>
+#include FT_FREETYPE_H
 #include <libg15render.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/statvfs.h>
 
 /* Exact port of libg15's dumpPixmapIntoLCDFormat(): converts libg15render's
    row-major MSB-first bitmap into the LCD's vertical "page" wire format. */
@@ -42,6 +54,26 @@ static void send_frame(g15canvas *canvas) {
     FILE *f = fopen("/dev/g510-lcd", "wb");
     if (!f) { perror("open /dev/g510-lcd"); return; }
     fwrite(report, 1, 992, f);
+    fclose(f);
+}
+
+/* Renders the canvas to a plain PPM image instead of the real hardware --
+   used by --preview so the GUI's editor pane shows pixel-for-pixel exactly
+   what the real LCD would show, using the identical drawing code path.
+   Colors are tinted to evoke the real G510's green-on-black panel. */
+static void write_ppm(g15canvas *c, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) { perror("open preview output"); return; }
+    fprintf(f, "P6\n%d %d\n255\n", G15_LCD_WIDTH, G15_LCD_HEIGHT);
+    for (int y = 0; y < G15_LCD_HEIGHT; y++) {
+        for (int x = 0; x < G15_LCD_WIDTH; x++) {
+            int lit = g15r_getPixel(c, x, y) == G15_COLOR_BLACK;
+            unsigned char px[3];
+            if (lit) { px[0] = 20; px[1] = 40; px[2] = 15; }
+            else     { px[0] = 190; px[1] = 214; px[2] = 145; }
+            fwrite(px, 1, 3, f);
+        }
+    }
     fclose(f);
 }
 
@@ -123,6 +155,98 @@ static double get_cpu_ghz(void) {
     return mhz / 1000.0;
 }
 
+/* --- Phase 2 sensors (v1.1) --- */
+
+static int read_hwmon_temp_c(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int millideg = 0;
+    fscanf(f, "%d", &millideg);
+    fclose(f);
+    return millideg / 1000;
+}
+
+static double get_gpu_percent(void) {
+    FILE *f = fopen("/sys/class/drm/card1/device/gpu_busy_percent", "r");
+    if (!f) return -1;
+    int v = 0;
+    fscanf(f, "%d", &v);
+    fclose(f);
+    return (double)v;
+}
+
+static double get_swap_percent(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f) return -1;
+    char label[64]; long value;
+    long swap_total = 0, swap_free = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%63s %ld", label, &value) == 2) {
+            if (strcmp(label, "SwapTotal:") == 0) swap_total = value;
+            else if (strcmp(label, "SwapFree:") == 0) swap_free = value;
+        }
+    }
+    fclose(f);
+    if (swap_total <= 0) return 0.0; /* no swap configured -- not an error */
+    return 100.0 * (swap_total - swap_free) / swap_total;
+}
+
+/* Returns -1 if the path isn't mounted right now (e.g. removable "frigider"
+   drive unplugged) instead of guessing or crashing. */
+static double get_disk_percent(const char *path) {
+    struct statvfs st;
+    if (statvfs(path, &st) != 0) return -1;
+    if (st.f_blocks == 0) return -1;
+    return 100.0 * (st.f_blocks - st.f_bfree) / st.f_blocks;
+}
+
+static double get_uptime_hours(void) {
+    FILE *f = fopen("/proc/uptime", "r");
+    if (!f) return 0.0;
+    double up = 0.0;
+    fscanf(f, "%lf", &up);
+    fclose(f);
+    return up / 3600.0;
+}
+
+/* Network throughput is delta-based, so it's computed exactly once per
+   frame (regardless of how many elements reference it) into these cached
+   globals -- calling the delta logic per-element would corrupt the deltas. */
+static double g_net_down_kbps = 0, g_net_up_kbps = 0;
+
+static void update_net_speed(void) {
+    static unsigned long long prev_rx = 0, prev_tx = 0;
+    static time_t prev_time = 0;
+    unsigned long long rx = 0, tx = 0;
+    FILE *f = fopen("/proc/net/dev", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *iface = strstr(line, "wlp4s0:");
+            if (iface) {
+                unsigned long long r, t;
+                sscanf(iface + 7, "%llu %*u %*u %*u %*u %*u %*u %*u %llu", &r, &t);
+                rx = r; tx = t;
+                break;
+            }
+        }
+        fclose(f);
+    }
+    time_t now = time(NULL);
+    double dt = prev_time > 0 ? difftime(now, prev_time) : 0;
+    if (dt > 0 && prev_rx > 0) {
+        g_net_down_kbps = (rx - prev_rx) / 1024.0 / dt;
+        g_net_up_kbps = (tx - prev_tx) / 1024.0 / dt;
+    }
+    prev_rx = rx; prev_tx = tx; prev_time = now;
+}
+
+static void format_kbps(double kbps, char *out, size_t outlen) {
+    if (kbps > 1024.0) snprintf(out, outlen, "%.1fM", kbps / 1024.0);
+    else snprintf(out, outlen, "%.0fK", kbps);
+}
+
 /* --- layout --- */
 
 #define ROW_CPU  3
@@ -156,6 +280,8 @@ static void draw_slim_bar(g15canvas *c, int x1, int x2, int y, int h, int pct) {
 static g15font *label_font = NULL;
 
 #define LABEL_Y_OFFSET 3 /* Eurostile's metrics sit higher than the number font's */
+#define FONT_PATH "/home/alextria/Desktop/System-Fixes/G510LCD/fonts/lcd-label-8.fnt"
+#define CUSTOM_SCREENS_PATH "/home/alextria/Desktop/System-Fixes/G510LCD/custom_screens.txt"
 
 static void draw_row(g15canvas *c, int y, const char *label, int pct,
                       const char *pct_str, const char *amount, int pct_y_nudge) {
@@ -183,6 +309,44 @@ static int read_screen(void) {
     return s;
 }
 
+/* Screen 0: the original built-in stats screen. Pulled into its own
+   function (was inline in main()) so --preview can render it through the
+   exact same code path as the live loop. */
+static int max_temp_seen = 0; /* highest temp observed since this program started */
+
+static void draw_stats_screen(g15canvas *canvas) {
+    double cpu_pct = get_cpu_percent();
+    char cpu_str[16], cpu_ghz_str[16];
+    snprintf(cpu_str, sizeof(cpu_str), "%3d%%", (int)(cpu_pct + 0.5));
+    snprintf(cpu_ghz_str, sizeof(cpu_ghz_str), "%.1fGHz", get_cpu_ghz());
+    draw_row(canvas, ROW_CPU, "CPU", (int)cpu_pct, cpu_str, cpu_ghz_str, 0);
+
+    long ram_used_kb, ram_total_kb;
+    get_ram_kb(&ram_used_kb, &ram_total_kb);
+    int ram_pct = ram_total_kb > 0 ? (int)(100.0 * ram_used_kb / ram_total_kb) : 0;
+    char ram_pct_str[16], ram_amt_str[16];
+    snprintf(ram_pct_str, sizeof(ram_pct_str), "%3d%%", ram_pct);
+    snprintf(ram_amt_str, sizeof(ram_amt_str), "%.1fG", ram_used_kb / (1024.0 * 1024.0));
+    draw_row(canvas, ROW_RAM, "RAM", ram_pct, ram_pct_str, ram_amt_str, 0);
+
+    unsigned long long vram_used, vram_total;
+    get_vram_bytes(&vram_used, &vram_total);
+    int vram_pct = vram_total > 0 ? (int)(100.0 * vram_used / vram_total) : 0;
+    char vram_pct_str[16], vram_amt_str[16];
+    snprintf(vram_pct_str, sizeof(vram_pct_str), "%3d%%", vram_pct);
+    format_gb(vram_used, vram_amt_str, sizeof(vram_amt_str));
+    draw_row(canvas, ROW_VRAM, "VRAM", vram_pct, vram_pct_str, vram_amt_str, 0);
+
+    int temp_c = get_cpu_temp_c();
+    if (temp_c > max_temp_seen) max_temp_seen = temp_c;
+    char temp_str[16], temp_max_str[16];
+    snprintf(temp_str, sizeof(temp_str), "%d" "\xB0" "C", temp_c);
+    snprintf(temp_max_str, sizeof(temp_max_str), "MAX %d" "\xB0" "C", max_temp_seen);
+    /* temp bar: use % of a 0-90C scale just to give a visual sense of magnitude */
+    int temp_pct = temp_c > 0 ? (temp_c * 100 / 90) : 0;
+    draw_row(canvas, ROW_TEMP, "TEMP", temp_pct, temp_str, temp_max_str, 1);
+}
+
 /* Screen 1: a simple large clock. New screens go here -- L1 cycles
    through however many screens NUM_SCREENS (in g510_lcd_buttons.c)
    currently accounts for. */
@@ -197,21 +361,236 @@ static void draw_clock_screen(g15canvas *c) {
     g15r_renderString(c, (unsigned char*)date_str, 0, G15_TEXT_SMALL, 10, 30);
 }
 
-/* Screens 2-5: temporary test screens for the L2-L5 buttons, so presses
-   are visibly confirmed before real actions get programmed onto them. */
-static void draw_button_test_screen(g15canvas *c, int screen) {
-    char label[8];
-    snprintf(label, sizeof(label), "L%d", screen);
-    g15r_G15FPrint(c, label, 0, 12, G15_TEXT_HUGE, G15_JUSTIFY_CENTER, G15_COLOR_BLACK, 0);
+/* --- Custom Screens (v1.1): user-built dashboards for L2-L5 --- */
+
+typedef struct {
+    const char *key;    /* used in custom_screens.txt and the GUI dropdown */
+    const char *label;  /* short on-screen label (fits the tiny font) */
+    int is_percent;      /* naturally 0-100 -- bar-capable, no scale guessing */
+    int is_temp;          /* temperature in C -- bar-capable via the existing 0-90C convention */
+} sensor_def_t;
+
+static const sensor_def_t SENSORS[] = {
+    {"CPU_PCT",          "CPU",  1, 0},
+    {"CPU_GHZ",          "GHZ",  0, 0},
+    {"CPU_TEMP",         "TEMP", 0, 1},
+    {"RAM_PCT",          "RAM",  1, 0},
+    {"VRAM_PCT",         "VRAM", 1, 0},
+    {"MAXTEMP",          "MAXT", 0, 1},
+    {"GPU_PCT",          "GPU",  1, 0},
+    {"GPU_EDGE_TEMP",    "EDGE", 0, 1},
+    {"GPU_HOTSPOT_TEMP", "HOT",  0, 1},
+    {"GPU_VRAM_TEMP",    "VMEM", 0, 1},
+    {"SWAP_PCT",         "SWAP", 1, 0},
+    {"DISK_ROOT_PCT",    "DISK", 1, 0},
+    {"DISK_FRIGIDER_PCT","FRIG", 1, 0},
+    {"UPTIME",           "UPTM", 0, 0},
+    {"NET_DOWN",         "DOWN", 0, 0},
+    {"NET_UP",           "UPLD", 0, 0},
+    {"MB_TEMP1",         "MB1",  0, 1},
+    {"MB_TEMP2",         "MB2",  0, 1},
+    {"MB_TEMP3",         "MB3",  0, 1},
+    {"MB_TEMP4",         "MB4",  0, 1},
+    {"MB_TEMP5",         "MB5",  0, 1},
+    {"MB_TEMP6",         "MB6",  0, 1},
+};
+
+static const sensor_def_t *find_sensor(const char *key) {
+    for (size_t i = 0; i < sizeof(SENSORS) / sizeof(SENSORS[0]); i++)
+        if (strcmp(SENSORS[i].key, key) == 0) return &SENSORS[i];
+    return NULL;
 }
 
-int main(void) {
-    int max_temp_seen = 0; /* highest temp observed since this program started */
-    label_font = g15r_loadG15Font("/home/alextria/Desktop/System-Fixes/G510LCD/fonts/lcd-label-8.fnt");
+/* Fills pct_for_bar (0-100, or -1 if this sensor has no honest bar scale /
+   is currently unavailable) and a short display string for the value. */
+static void get_sensor_value(const char *key, double *pct_for_bar, char *disp, size_t displen) {
+    *pct_for_bar = -1;
+    disp[0] = 0;
+
+    if (strcmp(key, "CPU_PCT") == 0) {
+        double v = get_cpu_percent();
+        *pct_for_bar = v;
+        snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+    } else if (strcmp(key, "CPU_GHZ") == 0) {
+        snprintf(disp, displen, "%.1fGHz", get_cpu_ghz());
+    } else if (strcmp(key, "CPU_TEMP") == 0) {
+        int t = get_cpu_temp_c();
+        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
+        snprintf(disp, displen, "%d\xB0" "C", t);
+    } else if (strcmp(key, "RAM_PCT") == 0) {
+        long u, t; get_ram_kb(&u, &t);
+        double v = t > 0 ? 100.0 * u / t : 0;
+        *pct_for_bar = v;
+        snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+    } else if (strcmp(key, "VRAM_PCT") == 0) {
+        unsigned long long u, t; get_vram_bytes(&u, &t);
+        double v = t > 0 ? 100.0 * u / t : 0;
+        *pct_for_bar = v;
+        snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+    } else if (strcmp(key, "MAXTEMP") == 0) {
+        snprintf(disp, displen, "%d\xB0" "C", max_temp_seen);
+    } else if (strcmp(key, "GPU_PCT") == 0) {
+        double v = get_gpu_percent();
+        if (v < 0) snprintf(disp, displen, "N/A");
+        else { *pct_for_bar = v; snprintf(disp, displen, "%d%%", (int)v); }
+    } else if (strcmp(key, "GPU_EDGE_TEMP") == 0) {
+        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp1_input");
+        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
+        snprintf(disp, displen, "%d\xB0" "C", t);
+    } else if (strcmp(key, "GPU_HOTSPOT_TEMP") == 0) {
+        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp2_input");
+        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
+        snprintf(disp, displen, "%d\xB0" "C", t);
+    } else if (strcmp(key, "GPU_VRAM_TEMP") == 0) {
+        int t = read_hwmon_temp_c("/sys/class/hwmon/hwmon2/temp3_input");
+        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
+        snprintf(disp, displen, "%d\xB0" "C", t);
+    } else if (strcmp(key, "SWAP_PCT") == 0) {
+        double v = get_swap_percent();
+        *pct_for_bar = v;
+        snprintf(disp, displen, "%d%%", (int)(v + 0.5));
+    } else if (strcmp(key, "DISK_ROOT_PCT") == 0) {
+        double v = get_disk_percent("/");
+        if (v < 0) snprintf(disp, displen, "N/A");
+        else { *pct_for_bar = v; snprintf(disp, displen, "%d%%", (int)(v + 0.5)); }
+    } else if (strcmp(key, "DISK_FRIGIDER_PCT") == 0) {
+        double v = get_disk_percent("/run/media/alextria/frigider");
+        if (v < 0) snprintf(disp, displen, "N/A");
+        else { *pct_for_bar = v; snprintf(disp, displen, "%d%%", (int)(v + 0.5)); }
+    } else if (strcmp(key, "UPTIME") == 0) {
+        snprintf(disp, displen, "%.0fh", get_uptime_hours());
+    } else if (strcmp(key, "NET_DOWN") == 0) {
+        format_kbps(g_net_down_kbps, disp, displen);
+    } else if (strcmp(key, "NET_UP") == 0) {
+        format_kbps(g_net_up_kbps, disp, displen);
+    } else if (strncmp(key, "MB_TEMP", 7) == 0) {
+        int n = atoi(key + 7);
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/class/hwmon/hwmon4/temp%d_input", n);
+        int t = read_hwmon_temp_c(path);
+        *pct_for_bar = t > 0 ? t * 100.0 / 90.0 : 0;
+        snprintf(disp, displen, "%d\xB0" "C", t);
+    }
+}
+
+#define MAX_ELEMENTS 8
+#define MAX_CUSTOM_SCREENS 4 /* L2, L3, L4, L5 */
+
+typedef struct {
+    char sensor[24];
+    char style[8]; /* "number" or "bar" */
+    int x, y;
+} element_t;
+
+typedef struct {
+    element_t elements[MAX_ELEMENTS];
+    int count;
+} custom_screen_t;
+
+static custom_screen_t custom_screens[MAX_CUSTOM_SCREENS];
+
+/* Reloaded every time a custom screen is drawn (cheap, small file) so
+   edits made live in the GUI show up on the next frame without needing
+   the daemon restarted. */
+static void load_custom_screens(void) {
+    for (int i = 0; i < MAX_CUSTOM_SCREENS; i++) custom_screens[i].count = 0;
+    FILE *f = fopen(CUSTOM_SCREENS_PATH, "r");
+    if (!f) return;
+    char line[256];
+    int current = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char *nl = strchr(line, '\n');
+        if (nl) *nl = 0;
+        if (strncmp(line, "SCREEN L", 8) == 0) {
+            int n = atoi(line + 8);
+            current = (n >= 2 && n <= 5) ? n - 2 : -1;
+        } else if (strncmp(line, "ELEMENT ", 8) == 0 && current >= 0) {
+            custom_screen_t *cs = &custom_screens[current];
+            if (cs->count >= MAX_ELEMENTS) continue;
+            element_t *el = &cs->elements[cs->count];
+            el->sensor[0] = 0; el->style[0] = 0; el->x = 0; el->y = 0;
+            char rest[256];
+            strncpy(rest, line + 8, sizeof(rest) - 1);
+            rest[sizeof(rest) - 1] = 0;
+            char *tok = strtok(rest, " ");
+            while (tok) {
+                char key[32], val[64];
+                if (sscanf(tok, "%31[^=]=%63s", key, val) == 2) {
+                    if (strcmp(key, "sensor") == 0) strncpy(el->sensor, val, sizeof(el->sensor) - 1);
+                    else if (strcmp(key, "style") == 0) strncpy(el->style, val, sizeof(el->style) - 1);
+                    else if (strcmp(key, "x") == 0) el->x = atoi(val);
+                    else if (strcmp(key, "y") == 0) el->y = atoi(val);
+                }
+                tok = strtok(NULL, " ");
+            }
+            if (el->sensor[0]) cs->count++;
+        }
+    }
+    fclose(f);
+}
+
+static void draw_element(g15canvas *c, element_t *el) {
+    const sensor_def_t *def = find_sensor(el->sensor);
+    if (!def) return;
+    double pct_for_bar;
+    char disp[32];
+    get_sensor_value(el->sensor, &pct_for_bar, disp, sizeof(disp));
+
+    g15r_G15FontRenderString(c, label_font, (char*)def->label, 0, el->x, el->y + LABEL_Y_OFFSET, G15_COLOR_BLACK, 0);
+    int label_w = g15r_testG15FontWidth(label_font, (char*)def->label);
+    int value_x = el->x + label_w + 4;
+
+    /* "bar" only ever applies to a sensor with an honest 0-100 scale
+       (a true percent, or a temperature via the same 0-90C convention
+       already used on the built-in stats screen). Anything else silently
+       falls back to number style rather than inventing a scale. */
+    if (strcmp(el->style, "bar") == 0 && (def->is_percent || def->is_temp) && pct_for_bar >= 0) {
+        int bar_x1 = value_x;
+        int bar_x2 = bar_x1 + 40;
+        draw_slim_bar(c, bar_x1, bar_x2, el->y, BAR_H, (int)pct_for_bar);
+        g15r_renderString(c, (unsigned char*)disp, 0, G15_TEXT_SMALL, bar_x2 + 4, el->y);
+    } else {
+        g15r_renderString(c, (unsigned char*)disp, 0, G15_TEXT_SMALL, value_x, el->y);
+    }
+}
+
+static void draw_custom_screen(g15canvas *c, int screen_num) {
+    load_custom_screens();
+    custom_screen_t *cs = &custom_screens[screen_num - 2];
+    if (cs->count == 0) {
+        char label[8];
+        snprintf(label, sizeof(label), "L%d", screen_num);
+        g15r_G15FPrint(c, label, 0, 8, G15_TEXT_LARGE, G15_JUSTIFY_CENTER, G15_COLOR_BLACK, 0);
+        g15r_renderString(c, (unsigned char*)"not set up yet", 0, G15_TEXT_SMALL, 24, 30);
+        return;
+    }
+    for (int i = 0; i < cs->count; i++) draw_element(c, &cs->elements[i]);
+}
+
+int main(int argc, char **argv) {
+    label_font = g15r_loadG15Font(FONT_PATH);
     if (!label_font) { fprintf(stderr, "failed to load custom font\n"); return 1; }
+
+    /* One-shot preview mode: render a single screen to an image file
+       through the exact same drawing code as the live LCD, then exit.
+       Used by the GUI's live editor -- never touches /dev/g510-lcd. */
+    if (argc >= 3 && strcmp(argv[1], "--preview") == 0) {
+        int screen = atoi(argv[2]);
+        const char *outpath = argc >= 4 ? argv[3] : "/tmp/g510_preview.ppm";
+        g15canvas canvas;
+        g15r_initCanvas(&canvas);
+        update_net_speed();
+        if (screen == 1) draw_clock_screen(&canvas);
+        else if (screen >= 2 && screen <= 5) draw_custom_screen(&canvas, screen);
+        else draw_stats_screen(&canvas);
+        write_ppm(&canvas, outpath);
+        return 0;
+    }
+
     while (1) {
         g15canvas canvas;
         g15r_initCanvas(&canvas);
+        update_net_speed();
 
         int screen = read_screen();
         if (screen == 1) {
@@ -221,43 +600,13 @@ int main(void) {
             continue;
         }
         if (screen >= 2 && screen <= 5) {
-            draw_button_test_screen(&canvas, screen);
+            draw_custom_screen(&canvas, screen);
             send_frame(&canvas);
             sleep(1);
             continue;
         }
 
-        double cpu_pct = get_cpu_percent();
-        char cpu_str[16], cpu_ghz_str[16];
-        snprintf(cpu_str, sizeof(cpu_str), "%3d%%", (int)(cpu_pct + 0.5));
-        snprintf(cpu_ghz_str, sizeof(cpu_ghz_str), "%.1fGHz", get_cpu_ghz());
-        draw_row(&canvas, ROW_CPU, "CPU", (int)cpu_pct, cpu_str, cpu_ghz_str, 0);
-
-        long ram_used_kb, ram_total_kb;
-        get_ram_kb(&ram_used_kb, &ram_total_kb);
-        int ram_pct = ram_total_kb > 0 ? (int)(100.0 * ram_used_kb / ram_total_kb) : 0;
-        char ram_pct_str[16], ram_amt_str[16];
-        snprintf(ram_pct_str, sizeof(ram_pct_str), "%3d%%", ram_pct);
-        snprintf(ram_amt_str, sizeof(ram_amt_str), "%.1fG", ram_used_kb / (1024.0 * 1024.0));
-        draw_row(&canvas, ROW_RAM, "RAM", ram_pct, ram_pct_str, ram_amt_str, 0);
-
-        unsigned long long vram_used, vram_total;
-        get_vram_bytes(&vram_used, &vram_total);
-        int vram_pct = vram_total > 0 ? (int)(100.0 * vram_used / vram_total) : 0;
-        char vram_pct_str[16], vram_amt_str[16];
-        snprintf(vram_pct_str, sizeof(vram_pct_str), "%3d%%", vram_pct);
-        format_gb(vram_used, vram_amt_str, sizeof(vram_amt_str));
-        draw_row(&canvas, ROW_VRAM, "VRAM", vram_pct, vram_pct_str, vram_amt_str, 0);
-
-        int temp_c = get_cpu_temp_c();
-        if (temp_c > max_temp_seen) max_temp_seen = temp_c;
-        char temp_str[16], temp_max_str[16];
-        snprintf(temp_str, sizeof(temp_str), "%d" "\xB0" "C", temp_c);
-        snprintf(temp_max_str, sizeof(temp_max_str), "MAX %d" "\xB0" "C", max_temp_seen);
-        /* temp bar: use % of a 0-90C scale just to give a visual sense of magnitude */
-        int temp_pct = temp_c > 0 ? (temp_c * 100 / 90) : 0;
-        draw_row(&canvas, ROW_TEMP, "TEMP", temp_pct, temp_str, temp_max_str, 1);
-
+        draw_stats_screen(&canvas);
         send_frame(&canvas);
         sleep(2);
     }
