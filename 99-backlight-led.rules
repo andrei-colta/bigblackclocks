@@ -1,0 +1,1 @@
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="g15::kbd_backlight", RUN+="/bin/chgrp input /sys/class/leds/g15::kbd_backlight/brightness /sys/class/leds/g15::kbd_backlight/multi_intensity", RUN+="/bin/chmod 664 /sys/class/leds/g15::kbd_backlight/brightness /sys/class/leds/g15::kbd_backlight/multi_intensity", RUN+="/home/alextria/Desktop/System-Fixes/G510LCD/set-backlight-color.sh"
