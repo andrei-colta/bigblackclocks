@@ -148,19 +148,31 @@ FINAL DEPENDENCY LIST (from real AUR RPC data, not guessed)
 libyaml, luajit, systemd-libs. MakeDepends: cmake. License GPL-3.0.
 All ordinary Arch extra/core packages, no exotic transitive AUR chain.
 
-ONE-SHOT INSTALL COMMAND (paste once, nothing else needed)
+INSTALL SCRIPT: ./install-g910.sh (added 2026-09-14)
 ----------------------------------------------------------------
-sudo pacman -S --needed base-devel git cmake libevdev libuv libx11 libxi libyaml luajit systemd-libs python-pyqt5 python-evdev python-dbus && \
-yay -S --needed keyleds
+Actual runnable script now, not just a pasted command -- mirrors the
+sibling G510s project's install.sh style (numbered steps, safe to
+re-run, --needed everywhere so it just skips what's already there).
+Separate script from install.sh on purpose (that one is the G510s
+project, different hardware/deps entirely).
+
+Equivalent to the one-shot command that was originally pasted here and
+confirmed working on 2026-09-13:
+  sudo pacman -S --needed base-devel git cmake libevdev libuv libx11 \
+      libxi libyaml luajit systemd-libs python-pyqt5 python-evdev python-dbus
+  yay -S --needed keyleds
 
 (base-devel/git/cmake = AUR build tooling; the rest are keyleds's own
 Depends, pre-installed via pacman so yay won't prompt mid-build.
 python-pyqt5/python-evdev already proven via the G510s app. python-dbus
-included in case the G910 app ends up talking to keyledsd over DBUS
-rather than its Cython bindings. yay -S keyleds compiles from source
-via cmake -- expect a short wait, not instant. No reboot needed; the
-udev rule takes effect on replug, or `sudo udevadm control --reload`
-+ replug if it doesn't pick up live.)
+turned out to NOT actually be needed by the final architecture -- this
+project ended up bypassing keyledsd entirely, reading hidraw directly
+and using keyledsctl/libkeyleds.so via ctypes instead -- kept anyway
+since it was part of the original confirmed-working install and costs
+nothing to have. yay -S keyleds compiles from source via cmake --
+expect a short wait, not instant. No reboot needed; the udev rule
+takes effect on replug, or `sudo udevadm control --reload` + replug if
+it doesn't pick up live.)
 
 INSTALL CONFIRMED (2026-09-13)
 ----------------------------------
