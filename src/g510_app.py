@@ -12,7 +12,6 @@ Phase 2 (later):     Custom Screen tab (text/image placement on screen 6).
 """
 import sys
 import json
-import re
 import subprocess
 from pathlib import Path
 
@@ -48,8 +47,6 @@ COLOR_RGB = {
     "Pink": (255, 0, 150),
     "White": (255, 255, 255),
 }
-DEFAULT_COLOR = "Blue-Violet"
-DEFAULT_BRIGHTNESS_PCT = 100
 
 
 def read_current_rgb():
@@ -111,28 +108,6 @@ def set_as_default(color_name, brightness_pct):
     return True, None
 
 
-def read_persisted_default():
-    """Reads the ACTUAL current boot default out of set-backlight-color.sh
-    (whatever Apply or Set as Default last wrote there), falling back to
-    DEFAULT_COLOR/DEFAULT_BRIGHTNESS_PCT only if the script is missing or
-    unparseable. This is what "Apply Defaults" should reapply -- NOT a
-    hardcoded constant, or it silently overwrites whatever you chose as
-    your actual default (confirmed bug: it did exactly this)."""
-    try:
-        content = DEFAULTS_SCRIPT.read_text()
-        rgb_match = re.search(r'echo "(\d+) (\d+) (\d+)"', content)
-        bright_match = re.search(r"echo (\d+) >", content)
-        if rgb_match and bright_match:
-            rgb = tuple(int(x) for x in rgb_match.groups())
-            brightness_val = int(bright_match.group(1))
-            for name, value in COLOR_RGB.items():
-                if value == rgb:
-                    return name, round(brightness_val * 100 / 255)
-    except Exception:
-        pass
-    return DEFAULT_COLOR, DEFAULT_BRIGHTNESS_PCT
-
-
 ALL_SERVICES = [
     "g510-lcd-stats.service",
     "g510-lcd-buttons.service",
@@ -186,12 +161,9 @@ class BacklightTab(QWidget):
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply")
         apply_btn.clicked.connect(self.on_apply)
-        defaults_btn = QPushButton("Apply Defaults")
-        defaults_btn.clicked.connect(self.on_apply_defaults)
         set_default_btn = QPushButton("Set as Default")
         set_default_btn.clicked.connect(self.on_set_as_default)
         btn_row.addWidget(apply_btn)
-        btn_row.addWidget(defaults_btn)
         btn_row.addWidget(set_default_btn)
         layout.addLayout(btn_row)
 
@@ -213,14 +185,6 @@ class BacklightTab(QWidget):
 
     def on_apply(self):
         ok, err = apply_backlight(self.color_combo.currentText(), self.bright_slider.value())
-        if not ok:
-            QMessageBox.critical(self, "Error", err)
-
-    def on_apply_defaults(self):
-        color, brightness_pct = read_persisted_default()
-        self.color_combo.setCurrentText(color)
-        self.bright_slider.setValue(brightness_pct)
-        ok, err = apply_backlight(color, brightness_pct)
         if not ok:
             QMessageBox.critical(self, "Error", err)
 
