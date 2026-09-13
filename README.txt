@@ -11,45 +11,62 @@ the one thing it CAN'T automate: sourcing your own Eurostile Bold font).
 
 STATUS FOR AI AGENTS -- read this block only, skip the rest unless you
 need deep detail for actual debugging:
+
+v1.0 TAGGED (git tag v1.0, pushed). Everything below is DONE and
+confirmed working by the user -- don't re-diagnose any of it, only
+read further sections if something specific is actually broken.
+
 - PRIMARY UI is g510_app.py (PyQt5, one window, QTabWidget).
-  - Backlight tab = DONE, confirmed working: color preset dropdown,
-    brightness slider, Apply, Apply Defaults, Start, Restart Service.
-  - G-Keys tab = DONE, mostly confirmed: 3-group physical-layout grid
-    (2x3 per group), M1/M2/M3 profile buttons, record/save/clear per
-    G-key via a QThread + python-evdev, playback via ydotool through
-    g510_macro_daemon.py (separate systemd --user service, watches
-    /dev/g510-keys, tracks live active profile). G1 record+replay
-    under M1 CONFIRMED working by the user. Physical M1/M2/M3
-    profile-switching is UNVERIFIED -- user reported pressing M2 didn't
-    change behavior (G1 still played the M1 macro). Root cause not
-    found yet -- PAUSED at the user's request, do not assume it works.
-    Suspect: the KEY_MACRO_PRESET1/2/3 codes (691/692/693, from the
-    upstream kernel driver source, never verified empirically on this
-    exact keyboard) may not be what M1/M2/M3 actually send here --
-    test_mkeys.py-style capture (see BUTTONS section pattern) is the
-    next step, not a fix guess.
-  - M1/M2/M3/MR hardware INDICATOR LEDS (separate from RGB backlight --
-    g15::macro_preset1/2/3, g15::macro_record, on/off only) are wired
-    in g510_macro_daemon.py's light_profile_led() but the udev
-    permission rule for them hasn't taken effect yet (still root:root
-    at last check, synthetic trigger didn't apply it, real replug
-    wasn't tried). PAUSED at the user's request, low priority.
+  - Backlight tab: color preset dropdown, brightness slider, Apply
+    (live + persists as boot default), Set as Default (persists
+    WITHOUT touching the live color -- lets you preview other colors
+    via Apply without losing a chosen default), Start/Stop/Restart
+    Service (covers all 3 background services). "Apply Defaults" was
+    removed by request (redundant with Set as Default, and had a real
+    bug: it read from a hardcoded constant instead of the actual
+    persisted default -- if you ever see a similar "the button that's
+    supposed to remember what I set doesn't" complaint, check for this
+    exact class of bug first: hardcoded fallback vs. actually reading
+    the persisted file).
+  - G-Keys tab: 3-group physical-layout grid (2x3 per group), M1/M2/M3
+    profile buttons -- GUI now polls the daemon's live-profile file
+    every 500ms so it follows physical M-key presses too, not just its
+    own clicks (fixed a real bug: a custom QSS stylesheet was
+    swallowing Qt's default :checked visual, needed an explicit
+    QPushButton:checked rule). Each G-key: Record a keystroke combo
+    (QThread + python-evdev, grabs the device while recording) OR
+    type a shell command instead -- both confirmed working by the
+    user, replayed via g510_macro_daemon.py (separate systemd --user
+    service, watches /dev/g510-keys). M1/M2/M3 physically switching
+    the live profile: CONFIRMED working (the keycodes were never
+    actually wrong -- see BUTTONS section, the daemon logic was
+    already correct once tested). M1/M2/M3/MR hardware indicator LEDs:
+    CONFIRMED working -- the fix was switching from a declarative
+    MODE=/GROUP= udev rule (never matched, root cause not fully
+    understood beyond "these LEDs are seat-tagged and behave
+    differently") to the same ACTION=="add" + RUN+="chgrp/chmod"
+    pattern already proven for kbd_backlight.
 - The old yad/bash backlight UI (g510-backlight-control.sh +
   g510-backlight-apply.sh) is NOT on this branch anymore -- it lives on
   the `legacy-yad-backlight-script` branch as a standalone reference.
   g510_app.py is the only interface on main.
-- PHASE 2, NOT STARTED: a "Custom Screen" tab in g510_app.py for
-  placing text/PNG images on LCD screen 6 (reached by pressing L2,
-  which currently just shows a placeholder "L2" test screen). The user
-  EXPLICITLY wants this planned/confirmed with them BEFORE any code is
-  written -- do not start building it unprompted. png-to-lcd.py (PNG ->
-  raw XBM bitmap) and the g15r_drawXBM() render path are already
-  built+verified working (rectangle test rendered correctly) and ready
-  to reuse whenever Phase 2 actually starts.
-- Everything else below (LCD stats screen, L1/L3-L5 buttons, media-key
-  fixes, udev persistence, fonts) is DONE and confirmed working as of
-  the last session -- only read further if something in one of those
-  areas is actually broken.
+
+PHASE 2, NOT STARTED -- the user's own words: "the AIDA64 way of
+editing the display and drawing/setting functions/displays for the
+other L keys". Two parts:
+  1. A visual/drag-free screen editor (like AIDA64's LCD designer) for
+     placing text and PNG images on custom LCD screens -- NOT a
+     from-scratch GUI framework choice needed, PyQt5 is already the
+     app's framework. png-to-lcd.py (PNG -> raw XBM bitmap) and the
+     g15r_drawXBM() render path in g510_lcd_stats.c are already
+     built+verified working (a rectangle test rendered correctly on
+     the real screen) and ready to reuse.
+  2. Real functions for L2-L5 (currently just placeholder "L2".."L5"
+     test screens, see BUTTONS section) -- once part 1 exists, these
+     buttons should jump to specific custom screens/actions instead.
+The user EXPLICITLY wants this planned and confirmed with them BEFORE
+any code is written -- do not start building it unprompted, even
+though the technical pieces above are ready to go.
 
 (rest of this file: explains the WHY behind the non-obvious parts, for
 whoever/whatever needs to actually debug something)
