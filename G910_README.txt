@@ -442,3 +442,81 @@ NEXT STEPS (in order)
    anything "done" (per this whole repo's established standard: don't
    claim something works without it being physically confirmed by the
    user on the actual device).
+
+HID++ FEATURE MAP -- FULLY IDENTIFIED (2026-09-13/14, canvas-plan
+research), mandatory cross-post from the g910-canvas-rearchitect
+branch per the user's instruction that everything learned updates the
+main skeleton, not just a side branch.
+-------------------------------------------------------------------------
+Raw feature list from `keyledsctl info -d /dev/hidraw1`:
+  [0001, 0003, 4522, 0005, 1e00, 4540, 1eb0, 8010, 8020, 8030, 8060,
+   00c1, 1801, 1802, 8080, 8070, 1821]
+Mapped against libkeyleds' own real header
+(libkeyleds/include/keyleds/features.h, from the same compiled source
+tarball used in the earlier audit -- not guessed):
+  0001 = FEATURE            0003 = VERSION           0005 = NAME
+  4522 = GAMEMODE           4540 = KEYBOARD_LAYOUT_2  00c1 = DFU_CONTROL
+  8010 = GKEYS              8020 = MKEYS              8030 = MRKEYS
+  8060 = REPORTRATE         8080 = LEDS (the static per-key color
+                             feature we've been using this whole
+                             project, via feature_leds.c/keyledsctl)
+  8070 = LED_EFFECTS (separate from LEDS -- see below, NOT what we've
+                       been using, previously and WRONGLY assumed by
+                       the assistant to be the same as 8080 or to not
+                       exist -- corrected here)
+
+CORRECTION to an earlier mistake: at one point this session the
+assistant said "0x8070 = leds" -- that was backwards, caught while
+reading the real header directly instead of relying on memory.
+0x8080 = LEDS, 0x8070 = LED_EFFECTS. Keep this straight for any future
+protocol work.
+
+STILL UNIDENTIFIED by libkeyleds' own header (not in features.h at
+all): 1e00, 1eb0, 1801, 1802, 1821. Researched via web search (not
+guessed): on OTHER Logitech devices (G402 mouse, MX Master 3S) these
+same five IDs appear as "hidden" features. ONE OF THEM IS DANGEROUS,
+CONFIRMED BY A REAL SOURCE: 0x1802 = DEVICE RESET, explicitly flagged
+by other researchers as excluded from automated feature-probing sweeps
+because of what it does. DO NOT call/probe 0x1802 on this device. The
+other four (1e00, 1eb0, 1801, 1821) remain genuinely unidentified --
+not researched further yet, not assumed to be safe or relevant.
+
+FEATURE 0x8070 (LED_EFFECTS) -- REAL, DETAILED THIRD-PARTY SPEC FOUND,
+NOT YET VERIFIED ON THIS HARDWARE:
+Found a real, detailed HID++ 2.0 protocol writeup for this feature
+(openlogi.org/hidpp/features/x8070-color-led-effects) -- NOT
+implemented anywhere in libkeyleds (confirmed: no feature_led_effects.c
+or any 0x8070 reference exists in the whole keyleds-1.2.0 source tree).
+If accurate for this exact keyboard, this would be a genuine per-zone
+HARDWARE-SIDE effects engine (Disabled/FixedColor/PulsingBreathing/
+Cycling/ColorWave/Starlight/LightOnPress/BootUp/DemoMode/Ripple, effect
+IDs 0-11) with a persistence model (Volatile/VolatileAndNonVolatile/
+NonVolatileOnly -- the non-volatile options write to EEPROM, meaning
+colors/effects COULD survive power cycles at the firmware level if
+this works as documented). This would be a fundamentally better answer
+than anything considered so far for BOTH the "effects" feature request
+AND the reboot-persistence open question from the canvas plan --
+better than running keyledsd (which we already ruled out for real
+bugs) or a host-side software color-cycling loop.
+CAVEATS, stated honestly, not swept under the rug:
+- This is THIRD-PARTY reverse-engineering documentation, not Logitech's
+  own spec, and not yet tested against this specific G910 unit's
+  firmware at all.
+- The source document itself does not confirm G-series gaming
+  keyboards are covered by this feature description -- it says
+  "Logitech keyboards and mice" generally, without listing this model.
+- Nothing has been sent to feature 0x8070 on the real device yet. Any
+  actual use requires: (a) a safe READ-ONLY probe first (get_info,
+  function index 0, 3-byte short request) to see if the response shape
+  matches the documented format at all, before trusting any of the
+  write-side functions (set_zone_effect etc.), and (b) doing that probe
+  with the user's awareness/go-ahead first, same discipline as every
+  other write to this device throughout this project.
+- libkeyleds has zero code for this feature, so using it would mean
+  either implementing the raw HID++ calls ourselves (ctypes + manual
+  report construction, following the same report format already
+  reverse-engineered for reading gkeys/mkeys/mrkeys earlier in this
+  project) or finding another existing tool that already implements
+  0x8070 correctly.
+NEXT STEP if this gets pursued: a read-only get_info probe on
+/dev/hidraw1, reported back before anything else is attempted.
