@@ -1,0 +1,15 @@
+# Compiled binaries -- regenerate with rebuild.sh
+g510_lcd_stats
+g510_lcd_buttons
+__pycache__/
+*.pyc
+
+# Commercially-licensed font (Eurostile Bold) and its derived bitmap --
+# not ours to redistribute. See README "FONTS" section to reconvert
+# your own copy.
+fonts/source-ttf/*.otf
+fonts/source-ttf/*.ttf
+fonts/*.fnt
+
+# Generated at runtime, not part of the project itself
+custom_screen_images/*.bin
