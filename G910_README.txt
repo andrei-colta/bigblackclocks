@@ -9,12 +9,15 @@ STATUS FOR AI AGENTS -- read this block first:
 
 PLANNING PHASE. NO APP CODE WRITTEN YET. Do not start implementation
 until the user explicitly signs off on the finalized plan below --
-they have said this multiple times and it matters to them. A deep
-research pass (covering backend package health, alternative all-in-one
-tools, and a hidraw-vs-exclusive-USB-claim question) was dispatched as
-a background agent and had not yet reported back as of this writing --
-check with the user/session for its results before treating anything
-marked "TENTATIVE" below as final.
+they have said this multiple times and it matters to them. The deep
+research pass mentioned below has long since completed; all backend
+decisions are FINALIZED (see DECISIONS section). The G-key/M-key/MR
+HID protocol AND the M1/M2/M3/MR indicator LED control have both now
+been empirically proven working end-to-end on the real keyboard (see
+M-KEY/MR INDICATOR LED CONTROL section near the end of this file --
+this was the last major open unknown and it's now resolved). What
+remains is writing the actual g910_app.py / macro daemon / systemd
+service -- see NEXT STEPS at the end of this file.
 
 WHAT THIS IS SUPPOSED TO BECOME
 --------------------------------
@@ -176,12 +179,20 @@ Binaries present: /usr/bin/keyledsctl, /usr/bin/keyledsd. Confirmed
     per-key RGB, all 105 keys individually addressable (NOT zone-only
     -- this is real confirmation the earlier OpenRGB-vs-keyleds
     reasoning was correct)
-  LED block[02]:   5 keys, max_rgb(1,0,0)        <- red-only indicator
-    LEDs, almost certainly M1/M2/M3/MR/gamemode
+  LED block[02]:   5 keys, max_rgb(1,0,0)        <- CORRECTED below:
+    this is MULTIMEDIA (0x02 in the block enum), NOT the M-keys as
+    first guessed here -- see M-KEY/MR INDICATOR LED CONTROL section.
+    Never written to this session; leave alone, user confirmed these
+    keys already work perfectly.
   LED block[04]:   9 keys, max_rgb(255,255,255)  <- G-keys' own
-    individual backlighting, full RGB
-  LED block[10]:   2 keys, max_rgb(255,255,255)  <- logo/media, guess
-    not yet confirmed
+    individual backlighting, full RGB (KEYLEDS_BLOCK_GKEYS = 0x04)
+  LED block[10]:   2 keys, max_rgb(255,255,255)  <- LOGO block
+    (KEYLEDS_BLOCK_LOGO = 0x10, confirmed by exact match against the
+    real block enum, not a guess)
+  (Note: M1/M2/M3/MR have NO color-settable LED block on this unit at
+  all -- confirmed later in this file, "Led block 40 not found" -- they
+  are controlled via separate dedicated functions, not the block-color
+  system. See M-KEY/MR INDICATOR LED CONTROL section below.)
 
 G-KEY/M-KEY/MR PROTOCOL -- FULLY CONFIRMED VIA REAL RAW CAPTURE
 --------------------------------------------------------------------
@@ -300,16 +311,96 @@ RESOLVED UNKNOWNS from the previous research pass:
      revision -- we're not using keyledsd's X-focus-based profile
      switching, so this doesn't affect the plan either way.
 
+M-KEY/MR INDICATOR LED CONTROL -- CONFIRMED WORKING (2026-09-13)
+----------------------------------------------------------------------
+User noticed M1/M2/M3/MR indicator LEDs weren't lit and asked whether
+this was the same class of bug as the G510s's M-key LED fix. It is
+NOT the same bug -- confirmed by research before touching anything:
+the G510s issue was a udev permissions bug (a declarative rule that
+silently never matched). The G910's case is architecturally different.
+
+Root cause, confirmed from the actual keyleds source (the real
+compiled tarball, cached locally at
+~/.cache/yay/keyleds/keyleds-1.2.0.tar.xz -- read directly, not
+fetched from a possibly-different upstream commit):
+- The installed /usr/include/keyleds.h defines LED blocks as a
+  bitmask enum: KEYLEDS_BLOCK_KEYS=0x01, KEYLEDS_BLOCK_MULTIMEDIA=0x02,
+  KEYLEDS_BLOCK_GKEYS=0x04, KEYLEDS_BLOCK_LOGO=0x10,
+  KEYLEDS_BLOCK_MODES=0x40. CORRECTION to an earlier mistaken
+  assumption in this file: block "02" (5 keys, red-only) is
+  MULTIMEDIA, NOT the M-keys -- don't touch it, the user confirmed
+  those buttons already work perfectly and asked explicitly not to
+  mess with them. Nothing in this session ever wrote to block 02.
+- `keyledsctl get-leds -b modes` returned "Led block 40 not found" --
+  this exact G910 unit's firmware does not expose a MODES color-block
+  via the standard LED_BLOCK_INFO enumeration at all.
+- BUT libkeyleds.so (already installed, /usr/lib/libkeyleds.so.1) has
+  dedicated functions for this, confirmed by reading
+  libkeyleds/src/feature_gkeys.c directly from the real compiled
+  source: `keyleds_mkeys_set(device, target_id, mask)` -- doc comment:
+  "A bit mask of MKeys leds to turn on, bit0 for M1, bit1 for M2, ..."
+  -- and `keyleds_mrkeys_set(device, target_id, mask)` -- "bit0 for
+  MR." These call a SEPARATE HID++ feature (KEYLEDS_FEATURE_MKEYS /
+  KEYLEDS_FEATURE_MRKEYS) from MULTIMEDIA or the LED_BLOCK color
+  system entirely -- confirmed safe, no overlap with the working media
+  keys. The `keyledsctl` CLI tool simply never exposes these two
+  functions as a subcommand (confirmed by reading
+  keyledsctl/src/keyledsctl_gkeys.c -- it only calls
+  keyleds_gkeys_enable, nothing else). That's the actual root cause:
+  a missing CLI feature, not a permissions or hardware bug.
+
+FIX, tested and confirmed physically working by the user, one key at a
+time, via a minimal ctypes wrapper calling libkeyleds.so directly
+(bypassing the CLI's gap, using the exact same keyleds_open() calling
+convention as the real CLI: path + app_id 0x9 (KEYLEDSCTL_APP_ID from
+keyledsctl/include/config.h.in), target_id 0xff
+(KEYLEDS_TARGET_DEFAULT)):
+  M1 lit:  keyleds_mkeys_set(device, 0xff, 0x01) -> user confirmed lit
+  M2 lit:  keyleds_mkeys_set(device, 0xff, 0x02) -> user confirmed lit,
+           AND confirmed M1 turned off automatically (mask REPLACES,
+           doesn't add -- only one bit needs to be set at a time for
+           normal M1/M2/M3 exclusivity)
+  M3 lit:  keyleds_mkeys_set(device, 0xff, 0x04) -> user confirmed lit
+  MR lit:  keyleds_mrkeys_set(device, 0xff, 0x01) -> user confirmed
+           lit, AND confirmed it's fully independent of M1/M2/M3 (M3
+           stayed lit at the same time MR was lit -- separate feature,
+           separate LED, can be on simultaneously)
+  MR off:  keyleds_mrkeys_set(device, 0xff, 0x00) -> confirmed working
+Keyboard left in a clean state after testing: M1 lit, MR off.
+Working test scripts (not final app code, proof-of-concept only) live
+in this session's scratchpad: light_m1.py, light_mr.py.
+
+IMPORTANT DISTINCTION the user specifically asked about: calling
+keyleds_mkeys_set only changes the LED. It does NOT select a "profile"
+on this keyboard -- unlike some other Logitech keyboards, the G910 via
+this library has no firmware-level onboard profile memory being
+switched here. "Profile" is a concept our own macro daemon will own in
+software: when the daemon sees a real M1/M2/M3 press (via the
+already-confirmed 0x09 HID++ report), it must (a) update its own
+in-memory/on-disk "current profile" state, used to pick which G1-G9
+macro set is active, AND (b) separately call keyleds_mkeys_set to keep
+the LED in sync with that software state. Same two-steps-tied-together
+architecture as the G510s sibling project's already-working M1/M2/M3
+profile switching (see README.txt's v1.0 section: "GUI now polls the
+daemon's live-profile file every 500ms"). MR will work the same way
+for the user's requested literal record-toggle behavior: daemon sees
+the MR press event, flips its own "currently recording" state, and
+calls keyleds_mrkeys_set to reflect that state on the physical LED.
+
 NEXT STEPS (in order)
 ------------------------
 1. Write g910_app.py (Backlight tab using `keyledsctl set-leds`/
-   `get-leds`, then G-Keys tab), reusing g510_app.py's
+   `get-leds` against LED block 01 only -- 105 keys, true per-key RGB
+   -- then G-Keys tab), reusing g510_app.py's
    RecorderThread/MacroRecordDialog pattern for macro recording.
 2. Write g910_macro_daemon.py: reads /dev/hidraw1 directly using the
    now-fully-confirmed report format above, runs `keyledsctl gkeys -d
-   /dev/hidraw1 on` at startup, dispatches G1-G9 macros (filtered by
-   active M1/M2/M3 profile), and treats MR as a literal record-toggle
-   event per the user's decision.
+   /dev/hidraw1 on` at startup, dispatches G1-G9 macros filtered by an
+   in-daemon "active profile" variable that M1/M2/M3 presses update,
+   calls keyleds_mkeys_set (via ctypes, same pattern as light_m1.py)
+   to keep the physical LED in sync with that variable, and treats MR
+   as a literal record-toggle event (flips daemon state + calls
+   keyleds_mrkeys_set to match) per the user's decision.
 3. Write the systemd --user service mirroring
    g510-macro-daemon.service's pattern (no udev rule needed, keyleds
    already installed one that grants non-root hidraw1 access).
