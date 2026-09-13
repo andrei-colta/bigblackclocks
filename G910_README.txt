@@ -76,81 +76,151 @@ Verified working: `ssh -T git@github.com` returns "Hi grumpybollocks!
 You've successfully authenticated". Don't recreate this key or config
 -- it's done.
 
-DECISIONS MADE SO FAR (some TENTATIVE, pending the research pass above)
---------------------------------------------------------------------------
-- MR key = literal macro-record toggle. CONFIRMED user decision, not
-  tentative -- don't revisit without the user raising it again.
-- Backlight tab backend: TENTATIVE lean toward `g810-led` (AUR
-  g810-led-git, the MatMoul fork) over OpenRGB. Reasoning so far: the
-  official OpenRGB wiki documents only ZONE-level control for the
-  G910, not true per-key, while g810-led's own CLI (`g810-led -k <key>
-  <color>`) demonstrates real per-key control, and an Arch Linux forum
-  thread from someone with this exact keyboard recommends g810-led
-  specifically for LEDs. NOT yet verified: whether g810-led-git's
-  actual source device table lists PID c335 (Orion Spectrum) explicitly
-  vs. only sibling models, whether the AUR package is actively
-  maintained / builds cleanly, and whether a simpler single-tool
-  alternative (keyleds -- claims to do BOTH per-key RGB AND G-key
-  events in one daemon) should replace this entirely. The dispatched
-  research pass is checking all of this.
-- G-Keys tab backend: TENTATIVE lean toward adapting
-  github.com/JSubelj/g910-gkey-macro-support's HID-report-reading
-  logic (the same forum thread's recommended dedicated G-key driver
-  for this exact keyboard -- built because nothing else existed).
-  CONCERN, not yet resolved: that project uses pyusb's
-  detach_kernel_driver() to EXCLUSIVELY claim a USB interface -- the
-  exact antipattern that broke media keys on the G510s sibling project
-  (g15daemon exclusively detaching the keyboard's extra-keys
-  interface). The research pass is checking whether a non-exclusive
-  hidraw read (matching this repo's established G510s philosophy: use
-  hidraw, never detach the kernel driver) can see the same G-key
-  reports, and whether JSubelj's exclusive claim is actually scoped
-  narrowly enough (interface 1 only, leaving normal typing on
-  interface 0 undisturbed) to be low-risk even if hidraw doesn't work.
-- Other candidates surfaced but not yet fully evaluated: logiops/logid
-  (G910 support status still unconfirmed), gkeybind, aquova/g910-macros
-  (Rust, lighter-weight uinput remap approach, no built-in macro/
-  profile logic of its own), "LogiGSK" (mentioned once in a forum
-  thread, not yet investigated at all).
+DECISIONS -- FINALIZED after a deep research pass (2026-09-13)
+-------------------------------------------------------------------
+- MR key = literal macro-record toggle. CONFIRMED user decision.
+- SUPERSEDED: the earlier lean toward `g810-led` for the Backlight tab
+  is WRONG and must not be used -- confirmed via the AUR RPC API that
+  both `g810-led` and `g810-led-git` have been REMOVED from AUR
+  (resultcount:0 for both names as of 2026-09-13). `yay -S
+  g810-led-git` would fail on a fresh install. Do not resurrect this
+  plan without re-checking AUR first.
+- FINAL BACKEND for BOTH tabs: `keyleds` (plain AUR package name, NOT
+  `keyleds-git` -- that's the original upstream, abandoned since 2021).
+  The correct package is maintained by `ticpu` (co-maintained by the
+  original author `spectras` + `jtyr`), points at
+  github.com/ticpu/keyleds, confirmed NOT archived and last pushed
+  2026-09-08 (5 days before this was checked) -- a live, actively
+  maintained project. One tool covers both the Backlight tab (per-key
+  RGB) and the G-Keys tab (G-key/M-key event source) instead of
+  stitching together two separate dependencies.
+  - Explicitly lists G410/G513/G610/G810/G910/GPro support, ships a
+    `keyledsctl` CLI, a DBUS interface, and a `python/keyleds.pyx`
+    Cython binding directory (a real Python API MAY be usable directly
+    -- unconfirmed whether it builds automatically with the main
+    package, see unknowns below).
+  - Its shipped `logitech.rules` udev file uses `uaccess` tagging
+    (systemd-logind seat-based access) on hidraw nodes restricted to
+    `bInterfaceProtocol=="00"` and on `ID_INPUT_KEY`-tagged event
+    nodes -- confirmed it does NOT use libusb's
+    detach_kernel_driver() anywhere. Same non-exclusive-claim
+    philosophy this repo's G510s project already validated. No custom
+    udev rule needs to be hand-written -- the AUR package installs its
+    own, and no runtime root/sudo is needed once installed.
+  - REAL, NOT HYPOTHETICAL CAVEAT: keyleds' own GitHub issues (#17,
+    #36, #57) show mixed real-world results from other G910 owners --
+    one report of the device not being detected at all, another of
+    individual zone names ("logo", "light") not working even though
+    broader effects do. These may predate ticpu's fork improvements,
+    but this is NOT confirmed clean -- treat as a real risk to verify
+    on this actual keyboard, not swept under the rug.
+- RULED OUT, with reasons (don't re-litigate without new evidence):
+  - OpenRGB: confirmed zone-only control for G910 per its own wiki
+    (established before this research pass).
+  - logiops/logid (AUR `logiops`, otherwise a healthy 29-vote
+    package): its own TESTED.md lists 17 devices, all MX-series
+    mice/keyboards -- zero G-series, zero "Orion", zero G910.
+    Definitively does not support this keyboard.
+  - LogiGSK: Java-based, LED-only (no G-key support at all), unusual
+    heavier toolchain (Apache Ant + `alien` .deb/.rpm conversion), no
+    evidence of recent activity. Not worth it next to keyleds.
+  - gkeybind: built on top of keyleds itself, plus needs the Crystal
+    language toolchain just to build. Unnecessary extra layer since
+    keyleds already exposes G-key events and we're building our own
+    PyQt5 macro UI, not reusing gkeybind's separate keybinding engine.
+  - aquova/g910-macros (Rust, uinput-remap-only): superseded by
+    keyleds' more complete feature set -- would still need something
+    else bolted on for actual macro/profile logic.
+- KEPT AS FALLBACK REFERENCE ONLY (not the primary plan): JSubelj's
+  g910-gkey-macro-support. Its actual usb_device.py source was
+  directly verified: detach_kernel_driver() targets INTERFACE 1 ONLY
+  (never interface 0, normal typing stays untouched) -- so the
+  "hogging" risk is smaller than first assumed. Real, working,
+  forum-confirmed option to fall back to if keyleds' G910 G-key
+  support turns out incomplete on real hardware.
+
+FINAL DEPENDENCY LIST (from real AUR RPC data, not guessed)
+----------------------------------------------------------------
+`keyleds` AUR package Depends: libevdev, libuv, libx11, libxi,
+libyaml, luajit, systemd-libs. MakeDepends: cmake. License GPL-3.0.
+All ordinary Arch extra/core packages, no exotic transitive AUR chain.
+
+ONE-SHOT INSTALL COMMAND (paste once, nothing else needed)
+----------------------------------------------------------------
+sudo pacman -S --needed base-devel git cmake libevdev libuv libx11 libxi libyaml luajit systemd-libs python-pyqt5 python-evdev python-dbus && \
+yay -S --needed keyleds
+
+(base-devel/git/cmake = AUR build tooling; the rest are keyleds's own
+Depends, pre-installed via pacman so yay won't prompt mid-build.
+python-pyqt5/python-evdev already proven via the G510s app. python-dbus
+included in case the G910 app ends up talking to keyledsd over DBUS
+rather than its Cython bindings. yay -S keyleds compiles from source
+via cmake -- expect a short wait, not instant. No reboot needed; the
+udev rule takes effect on replug, or `sudo udevadm control --reload`
++ replug if it doesn't pick up live.)
 
 WHAT'S EXPLICITLY *NOT* DONE YET
 -----------------------------------
-- No dependencies installed (not even g810-led -- only searched for,
-  never `yay -S`'d).
-- No udev rules written for the G910 (the G510s's 99-g510-lcd.rules
-  pattern -- ENV{} matching + chgrp/chmod to group "input" -- is the
-  template to reuse once the final tool choice is locked in, so no
-  sudo is needed at runtime, matching this repo's whole philosophy).
+- No dependencies installed yet -- the install command above has been
+  written and verified against real AUR data, but not yet run.
+- No custom udev rule needs to be written (keyleds ships its own,
+  uaccess-based -- confirmed above). Nothing to author here, just
+  install the package.
 - No hidraw capture of real G-key/M-key/MR byte sequences has been run
-  yet on this actual keyboard. JSubelj's project hints at report
-  shapes like [0x11, 0xff, 0x08, ...] for G-keys, but per this
-  project's strict no-guessing rule, those are a hypothesis to verify
-  empirically on THIS unit, not a fact to code against directly.
+  yet on this actual keyboard. Whether keyleds itself reports these
+  presses (and through which channel -- DBUS, keyledsctl, or the
+  Cython binding) is UNCONFIRMED, see unknowns below.
 - No g910_app.py file exists yet. No systemd service files for a G910
   macro daemon exist yet.
 - Nothing has been installed, compiled, or run against the real
   keyboard beyond read-only USB/evdev/sysfs inspection.
 
+REMAINING UNKNOWNS -- MUST be verified on the real keyboard, not
+assumed (per this project's strict no-guessing rule):
+------------------------------------------------------------------
+1. Whether keyledsd actually detects and controls THIS exact G910
+   unit's RGB with real per-key granularity (GitHub issues show mixed
+   results from other G910 owners -- #17: zone names like "logo"/
+   "light" don't work; #36: device not found for one user). Test with
+   `keyledsctl list-devices` and real key-color commands once
+   installed.
+2. Whether keyleds reports G-key/M-key/MR presses at all, and through
+   which channel (DBUS signal vs `keyledsctl` output vs the
+   `python/keyleds.pyx` binding) -- especially notable since our own
+   90-second live evdev capture on event2/event3 found ZERO G-key
+   activity, so this needs direct confirmation, not assumption from
+   the README.
+3. Whether MR shows up as its own distinct event (vs. only M1-M3 being
+   documented in most third-party tools) -- needed for the user's
+   requested "literal macro-record toggle" behavior.
+4. Whether the `python/keyleds.pyx` Cython binding builds automatically
+   with the main cmake build, or needs a separate build step -- affects
+   whether g910_app.py can `import keyleds` directly or must shell out
+   to `keyledsctl` / use DBUS instead.
+5. Session compatibility -- confirm this machine's Plasma session type
+   (X11 vs Wayland) since ticpu's fork advertises added Wayland support
+   as an improvement over the abandoned original; should confirm this
+   isn't moot before assuming it matters either way.
+If keyleds' G910 G-key support turns out incomplete on real hardware,
+fall back to adapting JSubelj/g910-gkey-macro-support (interface-1-only
+detach, confirmed low risk -- see DECISIONS above) rather than
+abandoning the whole plan.
+
 NEXT STEPS (in order)
 ------------------------
-1. Finish the in-flight research pass (backend package health check,
-   keyleds-as-single-tool evaluation, hidraw-vs-exclusive-claim
-   answer, exact dependency list, one consolidated install command).
-2. Present the finalized plan to the user, get explicit sign-off.
-3. Install dependencies (single install command, so the user -- who
-   does not code and wants minimal manual sudo steps -- can paste it
-   once).
-4. Empirically capture real hidraw G-key/M-key/MR byte sequences on
-   this actual keyboard (the user pressing each key on request) --
-   confirm or correct the hypothesized report structure before writing
-   any daemon logic against it.
-5. Write g910_app.py (Backlight tab, then G-Keys tab), reusing
+1. Present the finalized plan to the user, get explicit sign-off.
+   (Research pass complete as of 2026-09-13 -- see DECISIONS above.)
+2. Run the ONE-SHOT INSTALL COMMAND above (user pastes it once).
+3. Verify unknowns 1-5 above against the real keyboard -- especially
+   whether keyleds actually reports G-key presses, before writing any
+   daemon logic against an assumed report format.
+4. Write g910_app.py (Backlight tab, then G-Keys tab), reusing
    g510_app.py's RecorderThread/MacroRecordDialog pattern for macro
    recording.
-6. Write the macro daemon + systemd --user service + udev rule,
-   mirroring g510_macro_daemon.py / g510-macro-daemon.service /
-   99-g510-lcd.rules patterns from the sibling project.
-7. Test on real hardware, iterate with the user before calling
+5. Write the macro daemon + systemd --user service, mirroring
+   g510_macro_daemon.py / g510-macro-daemon.service patterns from the
+   sibling project (no udev rule needed this time, keyleds ships one).
+6. Test on real hardware, iterate with the user before calling
    anything "done" (per this whole repo's established standard: don't
    claim something works without it being physically confirmed by the
    user on the actual device).
