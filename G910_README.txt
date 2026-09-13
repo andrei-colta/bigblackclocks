@@ -520,3 +520,74 @@ CAVEATS, stated honestly, not swept under the rug:
   0x8070 correctly.
 NEXT STEP if this gets pursued: a read-only get_info probe on
 /dev/hidraw1, reported back before anything else is attempted.
+
+FEATURE 0x8070 -- CONFIRMED REAL AND WORKING ON THIS EXACT HARDWARE
+(2026-09-14), READ-ONLY PROBES ONLY, NOTHING WRITTEN TO THE DEVICE YET
+--------------------------------------------------------------------------
+The "next step" above was carried out. Method, precise, not guessed:
+cross-referenced two independent real sources first (a documented
+third-party spec, openlogi.org, AND libratbag's actual production C
+implementation, github.com/libratbag/libratbag src/hidpp20.c/.h --
+the second one confirmed this isn't just theoretical, it's real code
+running against real Logitech hardware today via Piper). Got the exact
+byte layout from libratbag's source rather than assume anything:
+REPORT_ID_SHORT=0x10, REPORT_ID_LONG=0x11 (from src/hidpp-generic.h),
+CMD_COLOR_LED_EFFECTS_GET_INFO=0x00, GET_ZONE_INFO=0x10 (from
+hidpp20.c), and the exact struct layouts from hidpp20.h.
+
+Reused proven, already-tested code where possible rather than
+reinvent: called the PUBLICLY EXPORTED `keyleds_get_feature_index()`
+from libkeyleds.so (the same library already used successfully for the
+M-key LED fix) via ctypes to resolve 0x8070's real per-device
+feature-index slot -- confirmed keyleds_call() itself (the library's
+internal generic request function) is NOT publicly exported, so the
+actual GET_INFO/GET_ZONE_INFO requests were constructed by hand as raw
+HID++ short reports and sent via a plain os.write()/os.read() on
+/dev/hidraw1 -- same non-exclusive hidraw approach already proven
+throughout this project, nothing new architecturally.
+
+RESULTS, verified against the real struct field order in libratbag's
+header (byte-by-byte, not assumed):
+  GET_INFO reply: zone_count=2, nv_capabilities=0x0001 (bit0 =
+    BOOT_UP_EFFECT supported per the spec's bitmask), ext_capabilities
+    =0x0000 (no extended capability flags set).
+  GET_ZONE_INFO zone 0: location=1 (PRIMARY -- the main keyboard),
+    num_effects=6, persistency_caps=0x00.
+  GET_ZONE_INFO zone 1: location=2 (LOGO), num_effects=4,
+    persistency_caps=0x00.
+So: this exact G910 Orion Spectrum genuinely has a working,
+responsive, real hardware-side effects engine via feature 0x8070,
+covering the Primary (main board) zone with 6 effects and the Logo
+zone with 4 effects. This is a real, confirmed capability, not
+speculation -- the device answered with correctly-structured data
+matching the documented protocol precisely.
+
+A REAL MISTAKE MADE AND CAUGHT WHILE DOING THIS, kept here honestly
+rather than silently fixed: the first version of the zone-info probe
+script mis-indexed the reply bytes (forgot the zone_info struct's
+leading `index` echo byte shifts every subsequent field over by one),
+so its first printed output mislabeled `num_effects` as
+`persistency_caps`. Caught by going back and reading the EXACT struct
+field order from libratbag's header (`index, location(BE16),
+num_effects, persistency_caps`) instead of trusting the quick script's
+first pass -- the numbers above are the corrected, struct-verified
+ones. Lesson: when parsing an unfamiliar binary reply, get the exact
+field layout from source first, don't reason about byte offsets from
+memory alone, even when the request format itself is already confirmed
+correct (the request worked fine; the mistake was only in interpreting
+the reply).
+
+WHAT'S STILL NOT KNOWN, explicitly, not swept under the rug:
+- WHICH of the 6 Primary-zone / 4 Logo-zone effects are which (effect
+  IDs, via GET_ZONE_EFFECT_INFO per zone+effect index) -- not yet
+  queried. Next safe read-only step if this is pursued further.
+- What persistency_caps=0x00 on both zones actually means for surviving
+  reboots in practice -- the enum in libratbag's header suggests
+  "unsupported" but this hasn't been tested against a real reboot, and
+  the field's exact semantics for THIS firmware aren't confirmed by a
+  primary source, only inferred from a general enum used across many
+  different Logitech devices.
+- Nothing has been WRITTEN to feature 0x8070 yet -- no set_zone_effect
+  call has been attempted. All probes so far are 100% read-only.
+- Feature 0x1802 (DEVICE RESET, see the feature map section above)
+  remains untouched and off-limits.
