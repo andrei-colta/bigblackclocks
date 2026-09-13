@@ -17,7 +17,7 @@ from pathlib import Path
 import evdev
 from evdev import ecodes
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 MACROS_FILE = PROJECT_DIR / "macros.json"
 DEVICE_PATH = "/dev/g510-keys"
 

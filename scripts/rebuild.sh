@@ -2,7 +2,7 @@
 # Rebuilds both G510 LCD programs and restarts their services.
 # Run this after editing g510_lcd_stats.c or g510_lcd_buttons.c.
 set -e
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/../src"
 
 echo "Building g510_lcd_stats..."
 gcc g510_lcd_stats.c -o g510_lcd_stats -lg15render

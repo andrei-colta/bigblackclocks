@@ -24,9 +24,9 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import evdev
 from evdev import ecodes
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = Path(__file__).resolve().parent.parent  # repo root (this file lives in src/)
 LED_DIR = Path("/sys/class/leds/g15::kbd_backlight")
-DEFAULTS_SCRIPT = PROJECT_DIR / "set-backlight-color.sh"
+DEFAULTS_SCRIPT = PROJECT_DIR / "scripts" / "set-backlight-color.sh"
 MACROS_FILE = PROJECT_DIR / "macros.json"
 MAIN_KEYBOARD_DEVICE = "/dev/input/by-id/usb-Logitech_G510s_Gaming_Keyboard-event-kbd"
 

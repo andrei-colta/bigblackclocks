@@ -23,12 +23,12 @@ fi
 yay -S --needed --noconfirm libg15 libg15render
 
 echo "=== 3/6: Compile the C programs ==="
-gcc g510_lcd_stats.c -o g510_lcd_stats -lg15render
-gcc g510_lcd_buttons.c -o g510_lcd_buttons
+gcc src/g510_lcd_stats.c -o src/g510_lcd_stats -lg15render
+gcc src/g510_lcd_buttons.c -o src/g510_lcd_buttons
 
 echo "=== 4/6: udev rules + hwdb (needs sudo) ==="
-sudo cp 99-g510-lcd.rules /etc/udev/rules.d/99-g510-lcd.rules
-sudo cp 91-g510-stop-to-playpause.hwdb /etc/udev/hwdb.d/91-g510-stop-to-playpause.hwdb
+sudo cp udev/99-g510-lcd.rules /etc/udev/rules.d/99-g510-lcd.rules
+sudo cp udev/91-g510-stop-to-playpause.hwdb /etc/udev/hwdb.d/91-g510-stop-to-playpause.hwdb
 sudo udevadm control --reload-rules
 sudo systemd-hwdb update
 echo "NOTE: unplug and replug the keyboard now so these fully apply."
@@ -36,7 +36,7 @@ read -p "Press Enter once you've replugged the keyboard..."
 
 echo "=== 5/6: systemd --user services ==="
 mkdir -p ~/.config/systemd/user
-cp g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service ~/.config/systemd/user/
+cp services/g510-lcd-stats.service services/g510-lcd-buttons.service services/g510-macro-daemon.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ydotool.service
 systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
