@@ -1,11 +1,36 @@
 G510s LCD Stats Screen + Buttons + Backlight
 =============================================
+Repo: github.com/grumpybollocks/bigblackclocks (pushed via SSH -- key
+already set up on this machine and on GitHub).
+Fresh-install setup: run ./install.sh (installs every dependency,
+places system files, compiles, enables services -- see that file for
+the one thing it CAN'T automate: sourcing your own Eurostile Bold font).
+
 STATUS FOR AI AGENTS -- read this block only, skip the rest unless you
 need deep detail for actual debugging:
-- PRIMARY UI is g510_app.py (PyQt5, one window, QTabWidget). Backlight
-  tab = DONE: color preset dropdown, brightness slider, Apply, Apply
-  Defaults, Start button, Restart Service button. All confirmed working
-  by the user.
+- PRIMARY UI is g510_app.py (PyQt5, one window, QTabWidget).
+  - Backlight tab = DONE, confirmed working: color preset dropdown,
+    brightness slider, Apply, Apply Defaults, Start, Restart Service.
+  - G-Keys tab = DONE, mostly confirmed: 3-group physical-layout grid
+    (2x3 per group), M1/M2/M3 profile buttons, record/save/clear per
+    G-key via a QThread + python-evdev, playback via ydotool through
+    g510_macro_daemon.py (separate systemd --user service, watches
+    /dev/g510-keys, tracks live active profile). G1 record+replay
+    under M1 CONFIRMED working by the user. Physical M1/M2/M3
+    profile-switching is UNVERIFIED -- user reported pressing M2 didn't
+    change behavior (G1 still played the M1 macro). Root cause not
+    found yet -- PAUSED at the user's request, do not assume it works.
+    Suspect: the KEY_MACRO_PRESET1/2/3 codes (691/692/693, from the
+    upstream kernel driver source, never verified empirically on this
+    exact keyboard) may not be what M1/M2/M3 actually send here --
+    test_mkeys.py-style capture (see BUTTONS section pattern) is the
+    next step, not a fix guess.
+  - M1/M2/M3/MR hardware INDICATOR LEDS (separate from RGB backlight --
+    g15::macro_preset1/2/3, g15::macro_record, on/off only) are wired
+    in g510_macro_daemon.py's light_profile_led() but the udev
+    permission rule for them hasn't taken effect yet (still root:root
+    at last check, synthetic trigger didn't apply it, real replug
+    wasn't tried). PAUSED at the user's request, low priority.
 - g510-backlight-control.sh + g510-backlight-apply.sh (yad/bash) are the
   SUPERSEDED old UI, kept only as fallback reference -- do not present
   them as "the" interface anymore, g510_app.py is.
