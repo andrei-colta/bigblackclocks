@@ -387,6 +387,40 @@ for the user's requested literal record-toggle behavior: daemon sees
 the MR press event, flips its own "currently recording" state, and
 calls keyleds_mrkeys_set to reflect that state on the physical LED.
 
+SELF-AUDIT PASS (2026-09-13) -- re-verifying claims before planning
+further, since earlier in this session there were real mistakes
+(wrong block-02 guess, corrected above; a failed disown/backgrounding
+approach; time lost fighting keyledsd's Lua plugin loader). Went back
+and checked what was actually tested vs. merely asserted:
+- GAP FOUND: block 01 ("keys", the 105-key main RGB block the entire
+  Backlight tab plan depends on) had NEVER been empirically tested
+  this session -- only "gkeys" (block 04) and "modes" (confirmed
+  absent) had been queried. This was a real hole in the verification,
+  not just a hypothetical worry.
+- NOW TESTED AND CONFIRMED:
+  - `keyledsctl get-leds -d /dev/hidraw1 -b keys` returns exactly 105
+    real key=color entries (matches the block's reported key count
+    exactly).
+  - `keyledsctl set-leds -d /dev/hidraw1 -b keys ESC=0000ff` -> user
+    physically confirmed the Escape key turned blue. Takes effect
+    immediately, no separate "commit" call needed (contradicts nothing
+    in the plan, just confirms it directly rather than assuming from
+    the man page).
+  - Restored ESC to its original color (`008001`, read from get-leds
+    before the test) afterward -- keyboard left exactly as found.
+- STILL UNVERIFIED, flagged honestly rather than asserted as fact:
+  - Block 04 (gkeys backlighting) has only been read (get-leds), never
+    written to (set-leds). Lower priority since the Backlight tab's
+    core plan targets block 01; block 04 was always described as
+    "possibly...secondary," not a commitment.
+  - Whether `keyledsctl gkeys on` truly needs to be re-run every
+    session/boot (vs. persisting) was inferred from how similar
+    third-party G910 projects describe the default F-key passthrough
+    behavior, not directly tested via an actual replug/reboot cycle.
+  - Practically low-stakes either way -- the daemon will call it at
+    every startup regardless, so this doesn't change the plan, just
+    noting it's an inference, not a directly observed fact.
+
 NEXT STEPS (in order)
 ------------------------
 1. Write g910_app.py (Backlight tab using `keyledsctl set-leds`/
