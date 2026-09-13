@@ -67,6 +67,18 @@ def read_current_brightness_pct():
         return 100
 
 
+def write_defaults_script(rgb, brightness_val):
+    script = f"""#!/bin/bash
+# Applies the chosen keyboard backlight color. Run automatically by
+# 99-g510-lcd.rules whenever the LED device appears (boot or replug).
+# Auto-updated by g510_app.py every time you click Apply or Set as Default.
+echo {brightness_val} > /sys/class/leds/g15::kbd_backlight/brightness
+echo "{rgb[0]} {rgb[1]} {rgb[2]}" > /sys/class/leds/g15::kbd_backlight/multi_intensity
+"""
+    DEFAULTS_SCRIPT.write_text(script)
+    DEFAULTS_SCRIPT.chmod(0o755)
+
+
 def apply_backlight(color_name, brightness_pct):
     """Writes the LED sysfs files AND rewrites set-backlight-color.sh so
     this becomes the new permanent boot default (matches the behavior
@@ -81,15 +93,20 @@ def apply_backlight(color_name, brightness_pct):
     except PermissionError as e:
         return False, f"Permission denied writing to {LED_DIR} -- check the udev rule (99-g510-lcd.rules) is installed: {e}"
 
-    script = f"""#!/bin/bash
-# Applies the chosen keyboard backlight color. Run automatically by
-# 99-g510-lcd.rules whenever the LED device appears (boot or replug).
-# Auto-updated by g510_app.py every time you click Apply.
-echo {brightness_val} > /sys/class/leds/g15::kbd_backlight/brightness
-echo "{rgb[0]} {rgb[1]} {rgb[2]}" > /sys/class/leds/g15::kbd_backlight/multi_intensity
-"""
-    DEFAULTS_SCRIPT.write_text(script)
-    DEFAULTS_SCRIPT.chmod(0o755)
+    write_defaults_script(rgb, brightness_val)
+    return True, None
+
+
+def set_as_default(color_name, brightness_pct):
+    """Persist-only: updates set-backlight-color.sh (the boot default)
+    WITHOUT touching the live backlight right now -- distinct from
+    Apply, which does both. Lets you keep previewing other colors live
+    without losing a default you've already decided on."""
+    rgb = COLOR_RGB.get(color_name)
+    if rgb is None:
+        return False, f"Unknown color: {color_name}"
+    brightness_val = round(brightness_pct * 255 / 100)
+    write_defaults_script(rgb, brightness_val)
     return True, None
 
 
@@ -148,8 +165,11 @@ class BacklightTab(QWidget):
         apply_btn.clicked.connect(self.on_apply)
         defaults_btn = QPushButton("Apply Defaults")
         defaults_btn.clicked.connect(self.on_apply_defaults)
+        set_default_btn = QPushButton("Set as Default")
+        set_default_btn.clicked.connect(self.on_set_as_default)
         btn_row.addWidget(apply_btn)
         btn_row.addWidget(defaults_btn)
+        btn_row.addWidget(set_default_btn)
         layout.addLayout(btn_row)
 
         layout.addWidget(QLabel("<b>Service Control</b> (LCD screen, buttons, macro daemon)"))
@@ -177,6 +197,11 @@ class BacklightTab(QWidget):
         self.color_combo.setCurrentText(DEFAULT_COLOR)
         self.bright_slider.setValue(DEFAULT_BRIGHTNESS_PCT)
         ok, err = apply_backlight(DEFAULT_COLOR, DEFAULT_BRIGHTNESS_PCT)
+        if not ok:
+            QMessageBox.critical(self, "Error", err)
+
+    def on_set_as_default(self):
+        ok, err = set_as_default(self.color_combo.currentText(), self.bright_slider.value())
         if not ok:
             QMessageBox.critical(self, "Error", err)
 
