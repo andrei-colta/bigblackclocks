@@ -159,68 +159,161 @@ via cmake -- expect a short wait, not instant. No reboot needed; the
 udev rule takes effect on replug, or `sudo udevadm control --reload`
 + replug if it doesn't pick up live.)
 
-WHAT'S EXPLICITLY *NOT* DONE YET
------------------------------------
-- No dependencies installed yet -- the install command above has been
-  written and verified against real AUR data, but not yet run.
-- No custom udev rule needs to be written (keyleds ships its own,
-  uaccess-based -- confirmed above). Nothing to author here, just
-  install the package.
-- No hidraw capture of real G-key/M-key/MR byte sequences has been run
-  yet on this actual keyboard. Whether keyleds itself reports these
-  presses (and through which channel -- DBUS, keyledsctl, or the
-  Cython binding) is UNCONFIRMED, see unknowns below.
-- No g910_app.py file exists yet. No systemd service files for a G910
-  macro daemon exist yet.
-- Nothing has been installed, compiled, or run against the real
-  keyboard beyond read-only USB/evdev/sysfs inspection.
+INSTALL CONFIRMED (2026-09-13)
+----------------------------------
+User ran the one-shot install command. Verified via `pacman -Qi
+keyleds`: version 1.2.0-1, all Depends satisfied, installed cleanly.
+Binaries present: /usr/bin/keyledsctl, /usr/bin/keyledsd. Confirmed
+`keyledsctl list` detects the real hardware:
+  /dev/hidraw1 046d:c335 [096239583837]   <- the G910
+  /dev/hidraw4 046d:c332 [1062376D3633]   <- the G502 mouse, also HID++
+`keyledsctl info -d /dev/hidraw1` output (real, not summarized):
+  Name: G910 Orion Spectrum, Model: c33500000000, Serial: 33394709
+  Known features: ... gamemode name layout2 gkeys mkeys mrkeys
+    reportrate dfu-control leds led-effects
+  G-keys: 9
+  LED block[01]: 105 keys, max_rgb(255,255,255)  <- main keys, TRUE
+    per-key RGB, all 105 keys individually addressable (NOT zone-only
+    -- this is real confirmation the earlier OpenRGB-vs-keyleds
+    reasoning was correct)
+  LED block[02]:   5 keys, max_rgb(1,0,0)        <- red-only indicator
+    LEDs, almost certainly M1/M2/M3/MR/gamemode
+  LED block[04]:   9 keys, max_rgb(255,255,255)  <- G-keys' own
+    individual backlighting, full RGB
+  LED block[10]:   2 keys, max_rgb(255,255,255)  <- logo/media, guess
+    not yet confirmed
 
-REMAINING UNKNOWNS -- MUST be verified on the real keyboard, not
-assumed (per this project's strict no-guessing rule):
-------------------------------------------------------------------
-1. Whether keyledsd actually detects and controls THIS exact G910
-   unit's RGB with real per-key granularity (GitHub issues show mixed
-   results from other G910 owners -- #17: zone names like "logo"/
-   "light" don't work; #36: device not found for one user). Test with
-   `keyledsctl list-devices` and real key-color commands once
-   installed.
-2. Whether keyleds reports G-key/M-key/MR presses at all, and through
-   which channel (DBUS signal vs `keyledsctl` output vs the
-   `python/keyleds.pyx` binding) -- especially notable since our own
-   90-second live evdev capture on event2/event3 found ZERO G-key
-   activity, so this needs direct confirmation, not assumption from
-   the README.
-3. Whether MR shows up as its own distinct event (vs. only M1-M3 being
-   documented in most third-party tools) -- needed for the user's
-   requested "literal macro-record toggle" behavior.
-4. Whether the `python/keyleds.pyx` Cython binding builds automatically
-   with the main cmake build, or needs a separate build step -- affects
-   whether g910_app.py can `import keyleds` directly or must shell out
-   to `keyledsctl` / use DBUS instead.
-5. Session compatibility -- confirm this machine's Plasma session type
-   (X11 vs Wayland) since ticpu's fork advertises added Wayland support
-   as an improvement over the abandoned original; should confirm this
-   isn't moot before assuming it matters either way.
-If keyleds' G910 G-key support turns out incomplete on real hardware,
-fall back to adapting JSubelj/g910-gkey-macro-support (interface-1-only
-detach, confirmed low risk -- see DECISIONS above) rather than
-abandoning the whole plan.
+G-KEY/M-KEY/MR PROTOCOL -- FULLY CONFIRMED VIA REAL RAW CAPTURE
+--------------------------------------------------------------------
+This was the single biggest open unknown and it is now COMPLETELY
+resolved, not guessed. Method: a small non-exclusive hidraw reader
+(os.open/os.read, no libusb, no detach_kernel_driver -- same low-risk
+approach as the G510s project) was run against /dev/hidraw1 while the
+user physically pressed G1 through G9, then M1-M3, then MR, in that
+exact order, one at a time. Every single press/release produced a
+clean, unambiguous 20-byte report. Full results:
+
+  G1: 11 ff 08 00 01 00 00...   (press) / 11 ff 08 00 00 00... (release)
+  G2: 11 ff 08 00 02 00 00...
+  G3: 11 ff 08 00 04 00 00...
+  G4: 11 ff 08 00 08 00 00...
+  G5: 11 ff 08 00 10 00 00...
+  G6: 11 ff 08 00 20 00 00...
+  G7: 11 ff 08 00 40 00 00...
+  G8: 11 ff 08 00 80 00 00...
+  G9: 11 ff 08 00 00 01 00...   <- spills into byte 5, bit 0 (9th key,
+                                    can't fit in the byte4 bitmask with
+                                    G1-G8)
+  M1: 11 ff 09 00 01 00 00...
+  M2: 11 ff 09 00 02 00 00...
+  M3: 11 ff 09 00 04 00 00...
+  MR: 11 ff 0a 00 01 00 00...   <- CONFIRMED a genuinely distinct event
+                                    (report type 0x0a), not just a 4th
+                                    M-profile -- directly supports the
+                                    user's requested "literal
+                                    macro-record toggle" design, no
+                                    workaround needed.
+
+Report structure: byte0=0x11, byte1=0xff (standard HID++ 2.0 "long
+report" prefix), byte2=event type (0x08=gkeys, 0x09=mkeys,
+0x0a=mrkeys), byte3=always 0x00 (reserved, confirmed constant across
+every single capture), byte4(+byte5 for G9 only)=bitmask, one bit per
+key in that group, set on press. Release = the exact same report shape
+with the bitmask zeroed (confirmed on every single key, no exceptions).
+20 bytes total per report.
+
+CRITICAL SETUP STEP, don't skip: by default the G910's G-keys act as
+plain F13-F21 passthrough (per aquova/g910-macros' and JSubelj's
+projects, matches what we saw too) and DO NOT emit these HID++ reports
+at all -- confirmed empirically: an earlier capture attempt with zero
+setup produced ZERO bytes on hidraw1 despite real key presses. The fix:
+  keyledsctl gkeys -d /dev/hidraw1 on
+run once, after which every press produced clean reports immediately
+and repeatably across multiple separate test runs. This command must
+run at daemon startup (systemd service ExecStartPre, or first line of
+the daemon itself) every time, since it's a live device-mode toggle,
+not a persisted setting.
+
+ARCHITECTURE REVISION based on this confirmed data
+-------------------------------------------------------
+Since the exact report format is now fully known and verified, the
+G-Keys tab does NOT need keyledsd (the background daemon) running at
+all -- and there's good reason to avoid it: keyledsd has its own real,
+observed bug on this exact machine (see BUGS FOUND below) and its
+Lua-plugin/effect discovery mechanism was fought with for a while
+without success (custom .lua effects placed via -m and in an effects/
+subdirectory were never found -- "no module <keytest> in search
+paths" -- root cause not resolved, not worth chasing further since we
+don't need it).
+Revised plan:
+  - G-Keys tab: our own small Python daemon reads /dev/hidraw1 directly
+    (hidraw_sniff.py in this session's scratchpad is a working proof of
+    concept for the read loop -- same pattern, not literally reused
+    verbatim, will become g910_macro_daemon.py mirroring
+    g510_macro_daemon.py's structure), sends `keyledsctl gkeys -d
+    /dev/hidraw1 on` once at startup, decodes the confirmed byte
+    format above, and drives macro playback/M-profile switching/MR
+    record-toggle directly -- no keyleds daemon in the loop for this
+    part at all.
+  - Backlight tab: still uses `keyledsctl` (the CLI, shelled out to,
+    not the Python binding -- see BUGS FOUND below for why) for
+    `set-leds`/`get-leds` per-key color commands against LED block 01
+    (confirmed 105 keys, true per-key RGB) and possibly block 04 (the
+    G-keys' own backlighting) as a secondary control.
+  - `keyleds` package stays installed for its `keyledsctl` binary and
+    udev rule (uaccess tagging -- confirmed this is what allows
+    non-root reads of hidraw1 at all). The `keyledsd` background
+    service itself is NOT needed and should not be enabled/autostarted
+    for this project.
+
+BUGS FOUND while testing keyledsd directly (real, observed, not
+hypothetical -- keep in mind if keyledsd is ever reconsidered):
+1. `could not load layout <c33500000000_0037.yaml>: No such file or
+   directory` -- logged on every single keyledsd startup against this
+   exact keyboard. The package only ships layout files for this model
+   suffixed 0001-0005,0007,0008,000a,000b -- 0037 (this unit's actual
+   firmware/region variant) isn't among them. keyledsd silently falls
+   back to loading a DIFFERENT KEYBOARD MODEL's layout entirely
+   (c32b00000000_0002.yaml, model c32b -- not c335) rather than erroring
+   out. If keyledsd's own key-name resolution is ever relied upon, key
+   names could be silently wrong. Not a blocker for the revised
+   architecture above since we bypass keyledsd's layout system
+   entirely, but worth knowing if this project ever revisits it.
+2. Custom Lua effects (the `-m <path>` / effects/ subdirectory
+   mechanism documented in the sample config) could not be gotten
+   working in this session -- consistently "no module <name> in search
+   paths" regardless of directory placement. Not investigated further
+   since the revised architecture doesn't need it, but don't assume
+   custom Lua effects "just work" per the docs without re-verifying.
+
+RESOLVED UNKNOWNS from the previous research pass:
+  1. RGB granularity: CONFIRMED true per-key (105 keys, full RGB) --
+     see LED block 01 above.
+  2. G-key/M-key/MR event delivery: CONFIRMED via direct hidraw read,
+     full byte-level mapping captured -- see protocol table above.
+  3. MR as distinct event: CONFIRMED (report type 0x0a, separate from
+     M1-M3's 0x09) -- supports the literal record-toggle design as-is.
+  4. python/keyleds.pyx Cython binding: NOT NEEDED given the
+     architecture revision above (we shell out to keyledsctl and read
+     hidraw directly instead) -- no longer a blocking unknown.
+  5. Session compatibility (X11/Wayland): moot given the architecture
+     revision -- we're not using keyledsd's X-focus-based profile
+     switching, so this doesn't affect the plan either way.
 
 NEXT STEPS (in order)
 ------------------------
-1. Present the finalized plan to the user, get explicit sign-off.
-   (Research pass complete as of 2026-09-13 -- see DECISIONS above.)
-2. Run the ONE-SHOT INSTALL COMMAND above (user pastes it once).
-3. Verify unknowns 1-5 above against the real keyboard -- especially
-   whether keyleds actually reports G-key presses, before writing any
-   daemon logic against an assumed report format.
-4. Write g910_app.py (Backlight tab, then G-Keys tab), reusing
-   g510_app.py's RecorderThread/MacroRecordDialog pattern for macro
-   recording.
-5. Write the macro daemon + systemd --user service, mirroring
-   g510_macro_daemon.py / g510-macro-daemon.service patterns from the
-   sibling project (no udev rule needed this time, keyleds ships one).
-6. Test on real hardware, iterate with the user before calling
+1. Write g910_app.py (Backlight tab using `keyledsctl set-leds`/
+   `get-leds`, then G-Keys tab), reusing g510_app.py's
+   RecorderThread/MacroRecordDialog pattern for macro recording.
+2. Write g910_macro_daemon.py: reads /dev/hidraw1 directly using the
+   now-fully-confirmed report format above, runs `keyledsctl gkeys -d
+   /dev/hidraw1 on` at startup, dispatches G1-G9 macros (filtered by
+   active M1/M2/M3 profile), and treats MR as a literal record-toggle
+   event per the user's decision.
+3. Write the systemd --user service mirroring
+   g510-macro-daemon.service's pattern (no udev rule needed, keyleds
+   already installed one that grants non-root hidraw1 access).
+4. Test on real hardware, iterate with the user before calling
    anything "done" (per this whole repo's established standard: don't
    claim something works without it being physically confirmed by the
    user on the actual device).
