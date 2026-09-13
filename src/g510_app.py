@@ -18,9 +18,9 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout,
     QHBoxLayout, QGridLayout, QComboBox, QSlider, QPushButton, QLabel,
-    QMessageBox, QDialog,
+    QMessageBox, QDialog, QLineEdit,
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 import evdev
 from evdev import ecodes
 
@@ -29,6 +29,12 @@ LED_DIR = Path("/sys/class/leds/g15::kbd_backlight")
 DEFAULTS_SCRIPT = PROJECT_DIR / "scripts" / "set-backlight-color.sh"
 MACROS_FILE = PROJECT_DIR / "macros.json"
 MAIN_KEYBOARD_DEVICE = "/dev/input/by-id/usb-Logitech_G510s_Gaming_Keyboard-event-kbd"
+
+
+def active_profile_file():
+    import os
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "/tmp")
+    return Path(runtime, "g510_macro_profile")
 
 COLOR_RGB = {
     "Blue-Violet": (110, 0, 255),
@@ -87,11 +93,17 @@ echo "{rgb[0]} {rgb[1]} {rgb[2]}" > /sys/class/leds/g15::kbd_backlight/multi_int
     return True, None
 
 
+ALL_SERVICES = [
+    "g510-lcd-stats.service",
+    "g510-lcd-buttons.service",
+    "g510-macro-daemon.service",
+]
+
+
 def run_systemctl(action):
     try:
         subprocess.run(
-            ["systemctl", "--user", action,
-             "g510-lcd-stats.service", "g510-lcd-buttons.service"],
+            ["systemctl", "--user", action] + ALL_SERVICES,
             check=True, capture_output=True, text=True,
         )
         return True, None
@@ -140,13 +152,16 @@ class BacklightTab(QWidget):
         btn_row.addWidget(defaults_btn)
         layout.addLayout(btn_row)
 
-        layout.addWidget(QLabel("<b>Service Control</b>"))
+        layout.addWidget(QLabel("<b>Service Control</b> (LCD screen, buttons, macro daemon)"))
         svc_row = QHBoxLayout()
         start_btn = QPushButton("Start")
         start_btn.clicked.connect(lambda: self.on_service_action("start"))
+        stop_btn = QPushButton("Stop")
+        stop_btn.clicked.connect(lambda: self.on_service_action("stop"))
         restart_btn = QPushButton("Restart Service")
         restart_btn.clicked.connect(lambda: self.on_service_action("restart"))
         svc_row.addWidget(start_btn)
+        svc_row.addWidget(stop_btn)
         svc_row.addWidget(restart_btn)
         layout.addLayout(svc_row)
 
@@ -180,9 +195,12 @@ def load_macros():
     return {"M1": {}, "M2": {}, "M3": {}}
 
 
-def save_macro(profile, gkey, sequence):
+def save_macro(profile, gkey, value, kind="keys"):
+    """kind is 'keys' (a ydotool key-sequence string) or 'command' (a
+    shell command string). Stored as {"type": ..., "value": ...} --
+    g510_macro_daemon.py checks 'type' to decide how to replay it."""
     macros = load_macros()
-    macros.setdefault(profile, {})[gkey] = sequence
+    macros.setdefault(profile, {})[gkey] = {"type": kind, "value": value}
     MACROS_FILE.write_text(json.dumps(macros, indent=2))
 
 
@@ -242,9 +260,13 @@ class MacroRecordDialog(QDialog):
 
         macros = load_macros()
         existing = macros.get(profile, {}).get(gkey)
-        self.status_label = QLabel(
-            "Currently assigned." if existing else "Nothing assigned yet."
-        )
+        if isinstance(existing, dict) and existing.get("type") == "command":
+            status_text = f"Currently runs: {existing.get('value', '')}"
+        elif existing:
+            status_text = "Currently assigned (recorded keystrokes)."
+        else:
+            status_text = "Nothing assigned yet."
+        self.status_label = QLabel(status_text)
         layout.addWidget(self.status_label)
 
         self.record_btn = QPushButton("Record")
@@ -263,6 +285,18 @@ class MacroRecordDialog(QDialog):
         btn_row.addWidget(clear_btn)
         btn_row.addWidget(cancel_btn)
         layout.addLayout(btn_row)
+
+        layout.addWidget(QLabel("<b>Or run a command instead:</b>"))
+        cmd_row = QHBoxLayout()
+        self.command_edit = QLineEdit()
+        self.command_edit.setPlaceholderText("e.g. notify-send hello")
+        if isinstance(existing, dict) and existing.get("type") == "command":
+            self.command_edit.setText(existing.get("value", ""))
+        save_cmd_btn = QPushButton("Save Command")
+        save_cmd_btn.clicked.connect(self.on_save_command)
+        cmd_row.addWidget(self.command_edit)
+        cmd_row.addWidget(save_cmd_btn)
+        layout.addLayout(cmd_row)
 
         self.setLayout(layout)
 
@@ -301,7 +335,13 @@ class MacroRecordDialog(QDialog):
 
     def on_save(self):
         if self.recorded_sequence:
-            save_macro(self.profile, self.gkey, self.recorded_sequence)
+            save_macro(self.profile, self.gkey, self.recorded_sequence, kind="keys")
+        self.accept()
+
+    def on_save_command(self):
+        cmd = self.command_edit.text().strip()
+        if cmd:
+            save_macro(self.profile, self.gkey, cmd, kind="command")
         self.accept()
 
     def on_clear(self):
@@ -312,9 +352,9 @@ class MacroRecordDialog(QDialog):
 class GKeysTab(QWidget):
     """3 groups of 6 keys (2 rows x 3 columns each), stacked with spacing
     -- mirrors the G510s's actual physical G-key layout. M1/M2/M3 buttons
-    above select which profile you're viewing/editing here (the DAEMON
-    separately tracks which profile is live based on physical M-key
-    presses on the keyboard itself)."""
+    above select which profile you're viewing/editing; a poll timer
+    keeps this in sync with the daemon's live profile too, so pressing
+    the physical M1/M2/M3 keys updates the GUI the same way."""
     def __init__(self):
         super().__init__()
         self.current_profile = "M1"
@@ -330,7 +370,10 @@ class GKeysTab(QWidget):
         for name in ("M1", "M2", "M3"):
             btn = QPushButton(name)
             btn.setCheckable(True)
-            btn.setStyleSheet("font-weight: bold; font-size: 14px; padding: 6px 14px;")
+            btn.setStyleSheet(
+                "QPushButton { font-weight: bold; font-size: 14px; padding: 6px 14px; }"
+                "QPushButton:checked { background-color: #4a90d9; color: white; }"
+            )
             btn.clicked.connect(lambda _, n=name: self.select_profile(n))
             profile_row.addWidget(btn)
             self.profile_buttons[name] = btn
@@ -361,10 +404,25 @@ class GKeysTab(QWidget):
         layout.addStretch()
         self.setLayout(layout)
 
+        # Physical M1/M2/M3 presses on the keyboard update the daemon's
+        # active profile, written to a status file -- poll it so the GUI
+        # follows along instead of only reacting to its own buttons.
+        self.profile_poll_timer = QTimer(self)
+        self.profile_poll_timer.timeout.connect(self.poll_active_profile)
+        self.profile_poll_timer.start(500)
+
     def select_profile(self, name):
         self.current_profile = name
         for n, btn in self.profile_buttons.items():
             btn.setChecked(n == name)
+
+    def poll_active_profile(self):
+        try:
+            live = active_profile_file().read_text().strip()
+        except Exception:
+            return
+        if live in self.profile_buttons and live != self.current_profile:
+            self.select_profile(live)
 
     def open_key_dialog(self, gkey):
         dlg = MacroRecordDialog(self.current_profile, gkey, self)

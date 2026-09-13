@@ -6,10 +6,11 @@ Keys interface, and replays recorded macros via ydotool.
 M1/M2/M3 physically switch the LIVE profile (matches real hardware
 behavior) -- pressing M2 changes which 18 macros are active immediately.
 
-Macros are stored in macros.json as {"M1": {"G1": "29:1 29:0", ...}, ...}
--- each value is a ready-to-use `ydotool key` argument string (raw
-Linux keycode:value pairs), written by g510_app.py's recorder. Replay
-is a direct subprocess call, no translation needed here.
+Macros are stored in macros.json as {"M1": {"G1": {"type": "keys"|"command",
+"value": ...}, ...}, ...}. "keys" values are ready-to-use `ydotool key`
+argument strings (raw Linux keycode:value pairs); "command" values are
+shell commands run directly. Older entries may be a bare string instead
+of a dict -- treated as "keys" for backward compatibility.
 """
 import json
 import subprocess
@@ -79,9 +80,15 @@ def main():
         if event.code in G_KEY_CODES:
             gkey = G_KEY_CODES[event.code]
             macros = load_macros()  # reload each time -- app may have just saved a new one
-            sequence = macros.get(active_profile, {}).get(gkey)
-            if sequence:
-                subprocess.run(["ydotool", "key"] + sequence.split())
+            entry = macros.get(active_profile, {}).get(gkey)
+            if not entry:
+                continue
+            if isinstance(entry, str):  # legacy format, pre-command-support
+                subprocess.run(["ydotool", "key"] + entry.split())
+            elif entry.get("type") == "command":
+                subprocess.run(entry["value"], shell=True)
+            else:  # type == "keys"
+                subprocess.run(["ydotool", "key"] + entry["value"].split())
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ systemctl --user enable --now ydotool.service
 systemctl --user enable --now g510-lcd-stats.service g510-lcd-buttons.service g510-macro-daemon.service
 
 echo "=== 6/6: Desktop shortcuts ==="
-for f in "G510 LCD - App" "G510 LCD - Rebuild" "G510 LCD - Start" "G510 LCD - View Logs" "G510 LCD - Backlight Color" "G510 LCD - Project Folder"; do
+for f in "G510 LCD - App" "G510 LCD - Rebuild" "G510 LCD - Start" "G510 LCD - View Logs" "G510 LCD - Project Folder"; do
     if [ -f "$HOME/Desktop/$f.desktop" ]; then
         chmod +x "$HOME/Desktop/$f.desktop"
     fi
