@@ -2,6 +2,9 @@ G510s LCD Stats Screen + Buttons + Backlight
 =============================================
 Repo: github.com/grumpybollocks/bigblackclocks (pushed via SSH -- key
 already set up on this machine and on GitHub).
+Branches: `main` (this branch) = the Python app, actively developed.
+`legacy-yad-backlight-script` = the original yad/bash backlight tool,
+frozen there as a standalone reference -- not present on main anymore.
 Fresh-install setup: run ./install.sh (installs every dependency,
 places system files, compiles, enables services -- see that file for
 the one thing it CAN'T automate: sourcing your own Eurostile Bold font).
@@ -31,9 +34,10 @@ need deep detail for actual debugging:
     permission rule for them hasn't taken effect yet (still root:root
     at last check, synthetic trigger didn't apply it, real replug
     wasn't tried). PAUSED at the user's request, low priority.
-- g510-backlight-control.sh + g510-backlight-apply.sh (yad/bash) are the
-  SUPERSEDED old UI, kept only as fallback reference -- do not present
-  them as "the" interface anymore, g510_app.py is.
+- The old yad/bash backlight UI (g510-backlight-control.sh +
+  g510-backlight-apply.sh) is NOT on this branch anymore -- it lives on
+  the `legacy-yad-backlight-script` branch as a standalone reference.
+  g510_app.py is the only interface on main.
 - PHASE 2, NOT STARTED: a "Custom Screen" tab in g510_app.py for
   placing text/PNG images on LCD screen 6 (reached by pressing L2,
   which currently just shows a placeholder "L2" test screen). The user
@@ -71,7 +75,7 @@ FILES
   g510-lcd-buttons.service  - systemd --user unit for the above
   99-g510-lcd.rules         - udev rules (see PERSISTENCE below)
   fonts/lcd-label-8.fnt     - the label font, converted, actually used (see FONTS below)
-  fonts/source-ttf/Eurostile_Bold.otf
+  fonts/source-ttf/Euro_Bold.otf
                             - the original font lcd-label-8.fnt was converted
                               FROM (keep this -- you need it to reconvert at
                               a different size/gap; the .fnt alone can't be
@@ -80,8 +84,6 @@ FILES
                               (auto-rewritten every time you click Apply
                               in the GUI -- don't hand-edit and expect it
                               to stick, the GUI owns this file now)
-  g510-backlight-control.sh - SUPERSEDED by g510_app.py, kept as fallback
-  g510-backlight-apply.sh   - SUPERSEDED by g510_app.py, kept as fallback
   rebuild.sh                - recompiles both programs, restarts services
   view-logs.sh              - tails both services' logs live
   start.sh                  - one-click start (used by the Desktop icon)
@@ -92,7 +94,6 @@ Desktop icons (in ~/Desktop, named "G510 LCD - ..."):
   Start            - restarts both services (works whether stopped,
                      crashed, or just stuck/unresponsive)
   View Logs        - live log viewer
-  Backlight Color  - SUPERSEDED by the App icon, kept as fallback
   Project Folder   - opens this folder in the file manager
 
 HOW TO MAKE A CODE CHANGE
@@ -231,22 +232,19 @@ it: /sys/class/leds/g15::kbd_backlight/ -- `brightness` (0-255) and
 file -- turn that OFF in System Settings > Brightness & Color if you
 want manual control to actually stick.
 Applied automatically on boot/replug by set-backlight-color.sh via the
-udev rule. Use the "Backlight Color" Desktop icon to change it -- a
-proper combined GUI (yad form: color preset dropdown + brightness
-slider + Apply + Apply Defaults, all in one window, no sudo prompt).
-Whenever you click Apply, g510-backlight-apply.sh REWRITES
-set-backlight-color.sh with your new choice -- so whatever you pick
-becomes the new permanent boot default automatically, not just a
+udev rule. Use the "Backlight" tab in g510_app.py to change it -- a
+color preset dropdown + brightness slider, Apply / Apply Defaults, no
+sudo prompt. Whenever you click Apply, apply_backlight() in g510_app.py
+REWRITES set-backlight-color.sh with your new choice -- so whatever you
+pick becomes the new permanent boot default automatically, not just a
 one-time live change. "Apply Defaults" resets to Blue-Violet/full
 brightness (110 0 255) without touching the dropdown/slider state, and
 also persists that choice.
-Note: combining yad's live CLR color-picker widget with an SCL slider
-in one form CRASHES on this system (confirmed GTK bug) -- that's why
-this uses a preset-color dropdown (CB) instead of a free-form picker.
-Add more presets by editing the COLOR_RGB array at the top of both
-g510-backlight-control.sh and g510-backlight-apply.sh (keep them in
-sync -- yes, this is duplicated, a shared config file would be cleaner
-if you ever want to refactor it).
+Uses a preset-color dropdown (COLOR_RGB dict) rather than a live color
+picker -- a Qt color picker would work fine here (this isn't the yad
+CLR+SCL crash from the old script, see the legacy-yad-backlight-script
+branch for that story), just wasn't built yet. Add more presets by
+editing the COLOR_RGB dict near the top of g510_app.py.
 
 PERSISTENCE (why this survives reboots/updates)
 --------------------------------------------------
