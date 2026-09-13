@@ -591,3 +591,50 @@ WHAT'S STILL NOT KNOWN, explicitly, not swept under the rug:
   call has been attempted. All probes so far are 100% read-only.
 - Feature 0x1802 (DEVICE RESET, see the feature map section above)
   remains untouched and off-limits.
+
+FULL EFFECT CATALOG PER ZONE -- CONFIRMED VIA GET_ZONE_EFFECT_INFO
+(2026-09-14), still 100% read-only, nothing written:
+Queried every effect slot for both zones (request: function 0x20,
+params[0]=zone_index, params[1]=zone_effect_index; reply struct per
+libratbag's header: zone_index, zone_effect_index, effect_id(BE16),
+effect_caps(BE16), effect_period(BE16)).
+
+  Zone 0 (Primary, main board), 6 effects:
+    slot 0: Disabled            caps=0x0000 period=0ms
+    slot 1: Fixed (solid color) caps=0x0005 period=0ms
+    slot 2: Breathing           caps=0xc001 period=992ms
+    slot 3: Cycling             caps=0xc001 period=992ms
+    slot 4: Wave                caps=0xdce1 period=30ms
+    slot 5: Starlight           caps=0x0000 period=0ms
+  Zone 1 (Logo), 4 effects:
+    slot 0: Disabled            caps=0x0000 period=0ms
+    slot 1: Fixed (solid color) caps=0x0005 period=0ms
+    slot 2: Breathing           caps=0xc001 period=992ms
+    slot 3: Cycling             caps=0xc001 period=992ms
+    (no Wave/Starlight on the Logo zone -- makes sense, single small
+    zone, those effects need more physical area to read as intended)
+
+This is a real, confirmed, hardware-side effects engine on this exact
+keyboard -- genuine Breathing/Cycling/Wave/Starlight, running entirely
+on the device's own firmware, no keyledsd or any host daemon needed at
+all. Directly answers the original "effects" request from early in
+this project's planning far better than anything considered before
+(keyledsd was ruled out for real bugs; a host-side software color-loop
+was the fallback plan) -- IF the write side (set_zone_effect) actually
+works as documented once tested, which it has NOT been yet.
+
+`effect_caps` bit meanings not yet decoded (would need either more
+libratbag source reading or empirical bit-flipping against a real
+set_zone_effect call to infer, neither done yet). `effect_period` is
+likely the effect's natural animation cycle length in milliseconds
+where applicable (Breathing/Cycling both report 992ms, Wave reports a
+much faster 30ms) -- plausible reading, not confirmed against a
+primary source.
+
+NEXT STEP if this gets pursued further: an actual set_zone_effect
+write call -- e.g. setting zone 0 to effect slot 1 (Fixed) with a
+specific RGB color, the safest possible first write since it's
+equivalent to something already proven safe via the "leds" feature's
+static colors, just through a different feature. Requires the user's
+explicit go-ahead first, same as every other write to this device
+throughout this project -- not yet attempted.
